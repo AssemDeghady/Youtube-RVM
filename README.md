@@ -36,9 +36,9 @@ youtube_rvm/
   public/                Manifest and icon assets
   scripts/build.mjs      Vite build script producing self-contained bundles
   src/
-    common/              Filters and sensitive data redactor
+    common/              Filters, mutation recognition, and sensitive data redactor
     content/             Studio detector, navigation listener, and dev UI
-    interceptor/         Passive fetch and XHR observer
+    interceptor/         Passive fetch and XHR observer with in-memory replay
     types/               Shared TypeScript interfaces
   package.json           Dependencies and build scripts
   tsconfig.json          Strict TypeScript configuration
@@ -81,6 +81,19 @@ We need help capturing one real save request so we can map out the payload schem
 7. Look at the ShortLinker card. You will see a new entry appear showing the captured endpoint and status.
 8. Click the Copy JSON button on that card.
 9. Click Stop Capture, and paste the copied snippet into our project discussion or issue tracker.
+
+## Testing single-video replay
+
+Once a Related Video mutation is captured during your session, the extension displays a green Related Video Mutation card showing the Source Short and the chosen Related Video target ID.
+
+To verify whether your active browser session can reproduce the update without any third-party APIs:
+
+1. On the ShortLinker card, locate the Related Video Mutation box.
+2. Click the blue Test Replay button.
+3. A confirmation dialog will appear explaining that this will replay the last captured Related Video update for the same Short and Related Video.
+4. Click Replay to confirm.
+5. The extension will perform the exact request in the main page context using your existing session.
+6. You will immediately see the result displayed as either Success with HTTP 200 or Failed with the status code and sanitized error snippet.
 
 ## Built-in safety precautions
 

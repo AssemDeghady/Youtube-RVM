@@ -47,8 +47,32 @@ export interface CapturedRequest {
   source: 'fetch' | 'xhr';
 }
 
+export interface RelatedVideoMutationMeta {
+  sourceVideoId: string;
+  targetVideoId: string;
+  timestamp: string;
+  httpStatus: number | null;
+  pathname: string;
+  flowType?: string;
+  hasAttestation: boolean;
+}
+
+export interface ReplayResult {
+  success: boolean;
+  httpStatus: number;
+  statusText: string;
+  durationMs: number;
+  sourceVideoId: string;
+  targetVideoId: string;
+  timestamp: string;
+  sanitizedResponseSnippet: string;
+  attestationRejected?: boolean;
+}
+
 export const BRIDGE_EVENTS = {
   CAPTURE: 'shortlinker-network-capture',
   CONTROL: 'shortlinker-control-command',
-  SYNC: 'shortlinker-control-sync'
+  MUTATION_DETECTED: 'shortlinker-mutation-detected',
+  REPLAY_REQUEST: 'shortlinker-replay-request',
+  REPLAY_RESPONSE: 'shortlinker-replay-response'
 } as const;

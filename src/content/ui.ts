@@ -1,4 +1,4 @@
-import { StudioPageContext, CapturedRequest, BRIDGE_EVENTS } from '../types';
+import { StudioPageContext, CapturedRequest, RelatedVideoMutationMeta, ReplayResult, BRIDGE_EVENTS } from '../types';
 
 export class DevIndicatorUI {
   private hostElement: HTMLElement | null = null;
@@ -8,6 +8,9 @@ export class DevIndicatorUI {
   private isMinimized = false;
   private isCaptureActive = false;
   private capturedRequests: CapturedRequest[] = [];
+  private activeMutation: RelatedVideoMutationMeta | null = null;
+  private replayState: 'idle' | 'confirming' | 'replaying' | 'done' = 'idle';
+  private replayResult: ReplayResult | null = null;
   private activeTab: 'studio' | 'inspector' = 'studio';
 
   public mount(initialContext: StudioPageContext): void {
@@ -27,6 +30,26 @@ export class DevIndicatorUI {
       }
     }) as EventListener);
 
+    // Listen to Related Video mutation detection events
+    document.addEventListener(BRIDGE_EVENTS.MUTATION_DETECTED, ((event: CustomEvent<RelatedVideoMutationMeta>) => {
+      if (event.detail) {
+        this.activeMutation = event.detail;
+        this.replayState = 'idle';
+        this.replayResult = null;
+        this.activeTab = 'inspector';
+        this.render();
+      }
+    }) as EventListener);
+
+    // Listen to Replay result events
+    document.addEventListener(BRIDGE_EVENTS.REPLAY_RESPONSE, ((event: CustomEvent<ReplayResult>) => {
+      if (event.detail) {
+        this.replayResult = event.detail;
+        this.replayState = 'done';
+        this.render();
+      }
+    }) as EventListener);
+
     this.render();
   }
 
@@ -37,12 +60,10 @@ export class DevIndicatorUI {
   }
 
   public addCapturedRequest(req: CapturedRequest): void {
-    // Keep in-memory only (max 50 to avoid memory buildup)
     this.capturedRequests.unshift(req);
     if (this.capturedRequests.length > 50) {
       this.capturedRequests.pop();
     }
-    // Automatically switch to inspector tab if new request arrives while capturing
     if (this.isCaptureActive) {
       this.activeTab = 'inspector';
     }
@@ -51,7 +72,6 @@ export class DevIndicatorUI {
 
   private toggleCapture(): void {
     this.isCaptureActive = !this.isCaptureActive;
-    // Dispatch control event to MAIN world
     document.dispatchEvent(
       new CustomEvent(BRIDGE_EVENTS.CONTROL, {
         detail: { enabled: this.isCaptureActive }
@@ -63,6 +83,12 @@ export class DevIndicatorUI {
   private clearCaptures(): void {
     this.capturedRequests = [];
     this.render();
+  }
+
+  private triggerReplay(): void {
+    this.replayState = 'replaying';
+    this.render();
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_REQUEST));
   }
 
   private toggleMinimize(): void {
@@ -107,9 +133,9 @@ export class DevIndicatorUI {
         border-radius: 10px;
         box-shadow: 0 14px 30px -4px rgba(0, 0, 0, 0.7), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
         padding: 12px 14px;
-        width: 380px;
+        width: 400px;
         max-width: 90vw;
-        max-height: 80vh;
+        max-height: 85vh;
         display: flex;
         flex-direction: column;
         backdrop-filter: blur(8px);
@@ -186,10 +212,10 @@ export class DevIndicatorUI {
       }
       .tab-content {
         overflow-y: auto;
-        max-height: 480px;
+        max-height: 540px;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
         padding-right: 4px;
       }
       .tab-content::-webkit-scrollbar {
@@ -224,10 +250,10 @@ export class DevIndicatorUI {
         background: #27272a;
         border: 1px solid #3f3f46;
         border-radius: 6px;
-        padding: 10px;
+        padding: 8px 10px;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 6px;
       }
       .control-row {
         display: flex;
@@ -238,7 +264,7 @@ export class DevIndicatorUI {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        padding: 3px 8px;
+        padding: 2px 8px;
         border-radius: 12px;
         font-size: 11px;
         font-weight: 600;
@@ -251,23 +277,153 @@ export class DevIndicatorUI {
       }
       .btn {
         border: none;
-        padding: 5px 10px;
+        padding: 4px 10px;
         border-radius: 5px;
         font-size: 11px;
         font-weight: 500;
         cursor: pointer;
         transition: opacity 0.15s ease;
       }
-      .btn:hover {
+      .btn:hover:not(:disabled) {
         opacity: 0.9;
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
       }
       .btn-primary {
         background: ${this.isCaptureActive ? '#ef4444' : '#0284c7'};
         color: #ffffff;
       }
+      .btn-replay {
+        background: #2563eb;
+        color: #ffffff;
+        font-weight: 600;
+      }
+      .btn-cancel {
+        background: #4b5563;
+        color: #f3f4f6;
+      }
       .btn-secondary {
         background: #3f3f46;
         color: #e4e4e7;
+      }
+
+      /* Mutation Box Styles */
+      .mutation-box {
+        border: 1px solid #3f3f46;
+        border-radius: 6px;
+        padding: 10px;
+        background: #1c1c20;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .mutation-box.active {
+        border-color: #059669;
+        background: #06281e;
+      }
+      .mutation-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .mutation-title {
+        font-weight: 600;
+        font-size: 12px;
+        color: #fafafa;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .badge-captured {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 10px;
+        background: rgba(16, 185, 129, 0.2);
+        color: #34d399;
+        font-weight: 600;
+      }
+      .badge-empty {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 10px;
+        background: rgba(113, 113, 122, 0.2);
+        color: #a1a1aa;
+      }
+      .badge-exp {
+        font-size: 9px;
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: #d97706;
+        color: #fff;
+        font-weight: 600;
+      }
+      .mutation-fields {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 11px;
+      }
+      .field-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .field-label {
+        color: #9ca3af;
+      }
+      .field-val {
+        color: #f3f4f6;
+      }
+      .field-val.mono {
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        background: #18181b;
+        padding: 2px 5px;
+        border-radius: 3px;
+      }
+      .confirm-box {
+        background: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 5px;
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .confirm-text {
+        font-size: 11px;
+        color: #f3f4f6;
+        line-height: 1.35;
+      }
+      .confirm-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+      .result-box {
+        border-radius: 5px;
+        padding: 8px;
+        font-size: 11px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .result-box.success {
+        background: rgba(16, 185, 129, 0.15);
+        border: 1px solid #059669;
+        color: #34d399;
+      }
+      .result-box.failed {
+        background: rgba(239, 68, 68, 0.15);
+        border: 1px solid #dc2626;
+        color: #f87171;
+      }
+      .result-header {
+        font-weight: 700;
+        display: flex;
+        justify-content: space-between;
       }
       .card {
         background: #202023;
@@ -331,7 +487,7 @@ export class DevIndicatorUI {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         font-size: 10px;
         color: #a1a1aa;
-        max-height: 140px;
+        max-height: 120px;
         overflow-y: auto;
         white-space: pre-wrap;
         word-break: break-all;
@@ -354,7 +510,7 @@ export class DevIndicatorUI {
       }
       .empty-state {
         text-align: center;
-        padding: 18px 8px;
+        padding: 14px 8px;
         color: #71717a;
         font-size: 11px;
       }
@@ -375,7 +531,7 @@ export class DevIndicatorUI {
         <div class="badge-container minimized" id="expand-trigger">
           <div class="title-group">
             <span class="pulse-dot"></span>
-            <span class="main-title">ShortLinker POC ${this.isCaptureActive ? '(Capturing)' : ''}</span>
+            <span class="main-title">ShortLinker POC ${this.activeMutation ? '(Mutation Ready)' : ''}</span>
           </div>
         </div>
       `;
@@ -413,19 +569,115 @@ export class DevIndicatorUI {
         <span class="detail-val">${this.navCount}</span>
       </div>
       <div class="detail-row">
-        <span>Network Inspector:</span>
-        <span class="detail-val ${this.isCaptureActive ? 'highlight' : ''}">${this.isCaptureActive ? 'Capturing' : 'Standby'}</span>
+        <span>Mutation Captured:</span>
+        <span class="detail-val ${this.activeMutation ? 'highlight' : ''}">${this.activeMutation ? 'Yes (Ready)' : 'None'}</span>
       </div>
       <div style="margin-top: 6px; font-size: 11px; color: #a1a1aa; line-height: 1.4;">
-        Switch to the <b>Network Inspector</b> tab to start passive capture before editing a Related Video.
+        Switch to the <b>Network Inspector</b> tab to observe or test replaying the Related Video mutation.
       </div>
     `;
+
+    // Render Mutation Section
+    let mutationSectionHtml = '';
+    if (!this.activeMutation) {
+      mutationSectionHtml = `
+        <div class="mutation-box">
+          <div class="mutation-header">
+            <span class="mutation-title">Related Video Mutation</span>
+            <span class="badge-empty">None captured</span>
+          </div>
+          <div style="font-size: 11px; color: #71717a;">
+            No Related Video mutation captured yet.<br>
+            Change and save a Related Video on any Short to capture.
+          </div>
+        </div>
+      `;
+    } else {
+      let replayControlsHtml = '';
+      if (this.replayState === 'idle') {
+        replayControlsHtml = `
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+            <span class="badge-exp">Experimental</span>
+            <button class="btn btn-replay" id="btn-show-confirm">Test Replay</button>
+          </div>
+        `;
+      } else if (this.replayState === 'confirming') {
+        replayControlsHtml = `
+          <div class="confirm-box">
+            <div class="confirm-text">
+              This will replay the last captured Related Video update for the same Short and Related Video. Continue?
+            </div>
+            <div class="confirm-actions">
+              <button class="btn btn-cancel" id="btn-cancel-confirm">Cancel</button>
+              <button class="btn btn-replay" id="btn-exec-replay">Replay</button>
+            </div>
+          </div>
+        `;
+      } else if (this.replayState === 'replaying') {
+        replayControlsHtml = `
+          <div style="display: flex; justify-content: center; align-items: center; padding: 6px; color: #60a5fa; font-size: 11px; gap: 6px;">
+            <span class="pulse-dot"></span>
+            Replaying mutation in browser session...
+          </div>
+        `;
+      } else if (this.replayState === 'done' && this.replayResult) {
+        const isSuccess = this.replayResult.success;
+        replayControlsHtml = `
+          <div class="result-box ${isSuccess ? 'success' : 'failed'}">
+            <div class="result-header">
+              <span>Replay Result</span>
+              <span>${isSuccess ? 'Success — HTTP 200' : `Failed — HTTP ${this.replayResult.httpStatus || 'ERR'}`}</span>
+            </div>
+            <div>
+              ${
+                isSuccess
+                  ? `Verified: Short [${this.replayResult.sourceVideoId}] linked to [${this.replayResult.targetVideoId}] (${this.replayResult.durationMs}ms)`
+                  : `Status: ${this.replayResult.statusText} ${
+                      this.replayResult.attestationRejected ? '<br><b>Notice:</b> Attestation or challenge rejected.' : ''
+                    }`
+              }
+            </div>
+            <div class="code-container" style="margin-top: 4px;">
+              <pre class="code-box">${escapeHtml(this.replayResult.sanitizedResponseSnippet)}</pre>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
+              <button class="btn btn-secondary" id="btn-dismiss-replay">Dismiss</button>
+              <button class="btn btn-replay" id="btn-show-confirm">Test Replay Again</button>
+            </div>
+          </div>
+        `;
+      }
+
+      mutationSectionHtml = `
+        <div class="mutation-box active">
+          <div class="mutation-header">
+            <span class="mutation-title">Related Video Mutation</span>
+            <span class="badge-captured">Captured (HTTP ${this.activeMutation.httpStatus ?? 200})</span>
+          </div>
+          <div class="mutation-fields">
+            <div class="field-row">
+              <span class="field-label">Source Short:</span>
+              <span class="field-val mono">${this.activeMutation.sourceVideoId}</span>
+            </div>
+            <div class="field-row">
+              <span class="field-label">Related Video:</span>
+              <span class="field-val mono highlight">${this.activeMutation.targetVideoId}</span>
+            </div>
+            <div class="field-row">
+              <span class="field-label">Time:</span>
+              <span class="field-val">${this.activeMutation.timestamp}</span>
+            </div>
+          </div>
+          ${replayControlsHtml}
+        </div>
+      `;
+    }
 
     const cardsHtml =
       this.capturedRequests.length === 0
         ? `<div class="empty-state">${
             this.isCaptureActive
-              ? 'Listening for YouTube Studio metadata requests...<br>Perform a Related Video save in Studio to capture.'
+              ? 'Listening for YouTube Studio metadata requests...<br>Save a Related Video in Studio to capture.'
               : 'Capture is currently OFF.<br>Click "Start Capture" to record candidate requests.'
           }</div>`
         : this.capturedRequests
@@ -484,6 +736,9 @@ export class DevIndicatorUI {
           <span style="font-weight: 600; color: #f4f4f5;">${this.capturedRequests.length}</span>
         </div>
       </div>
+
+      ${mutationSectionHtml}
+
       <div style="display: flex; flex-direction: column; gap: 8px;">
         ${cardsHtml}
       </div>
@@ -539,6 +794,27 @@ export class DevIndicatorUI {
 
     this.shadowRoot.getElementById('clear-captures-btn')?.addEventListener('click', () => {
       this.clearCaptures();
+    });
+
+    // Replay controls bindings
+    this.shadowRoot.getElementById('btn-show-confirm')?.addEventListener('click', () => {
+      this.replayState = 'confirming';
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-cancel-confirm')?.addEventListener('click', () => {
+      this.replayState = 'idle';
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-exec-replay')?.addEventListener('click', () => {
+      this.triggerReplay();
+    });
+
+    this.shadowRoot.getElementById('btn-dismiss-replay')?.addEventListener('click', () => {
+      this.replayState = 'idle';
+      this.replayResult = null;
+      this.render();
     });
 
     // Copy buttons

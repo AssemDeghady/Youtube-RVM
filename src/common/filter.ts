@@ -60,3 +60,80 @@ export function isCandidateRequest(urlStr: string, method = 'POST'): { isCandida
 
   return { isCandidate: false, reason: 'No metadata/mutation keywords found' };
 }
+
+export interface RelatedVideoMutationDetection {
+  isRelatedVideoMutation: boolean;
+  sourceVideoId?: string;
+  targetVideoId?: string;
+  flowType?: string;
+  hasAttestation?: boolean;
+}
+
+/**
+ * Specifically identifies whether a request is a YouTube Shorts Related Video mutation.
+ * Matches: POST /youtubei/v1/video_manager/metadata_update
+ * requiring: videoLinkageShortsAttribution.targetExternalVideoId
+ */
+export function isRelatedVideoMutation(
+  urlStr: string,
+  method: string,
+  rawBody: any
+): RelatedVideoMutationDetection {
+  if (method.toUpperCase() !== 'POST') {
+    return { isRelatedVideoMutation: false };
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(urlStr, window.location.origin);
+  } catch {
+    return { isRelatedVideoMutation: false };
+  }
+
+  if (!parsedUrl.pathname.includes('/youtubei/v1/video_manager/metadata_update')) {
+    return { isRelatedVideoMutation: false };
+  }
+
+  let parsedBody: any = rawBody;
+  if (typeof rawBody === 'string') {
+    try {
+      parsedBody = JSON.parse(rawBody);
+    } catch {
+      return { isRelatedVideoMutation: false };
+    }
+  }
+
+  if (!parsedBody || typeof parsedBody !== 'object') {
+    return { isRelatedVideoMutation: false };
+  }
+
+  // Check for videoLinkageShortsAttribution.targetExternalVideoId
+  const linkage = parsedBody.videoLinkageShortsAttribution;
+  if (!linkage || typeof linkage !== 'object') {
+    return { isRelatedVideoMutation: false };
+  }
+
+  const targetExternal = linkage.targetExternalVideoId;
+  let targetVideoId = '';
+  if (Array.isArray(targetExternal) && targetExternal.length > 0) {
+    targetVideoId = String(targetExternal[0]);
+  } else if (typeof targetExternal === 'string') {
+    targetVideoId = targetExternal;
+  }
+
+  if (!targetVideoId) {
+    return { isRelatedVideoMutation: false };
+  }
+
+  const sourceVideoId = parsedBody.encryptedVideoId || '';
+  const flowType = parsedBody.flowType || '';
+  const hasAttestation = Boolean(parsedBody.attestationResponseData);
+
+  return {
+    isRelatedVideoMutation: true,
+    sourceVideoId,
+    targetVideoId,
+    flowType,
+    hasAttestation
+  };
+}

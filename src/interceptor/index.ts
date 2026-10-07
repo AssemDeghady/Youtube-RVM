@@ -1,6 +1,6 @@
-import { filterSafeHeaders, parseAndSanitizeBody } from '../common/sanitizer';
-import { isCandidateRequest } from '../common/filter';
-import { BRIDGE_EVENTS, CapturedRequest } from '../types';
+import { filterSafeHeaders, parseAndSanitizeBody, redactSensitiveData } from '../common/sanitizer';
+import { isCandidateRequest, isRelatedVideoMutation } from '../common/filter';
+import { BRIDGE_EVENTS, CapturedRequest, RelatedVideoMutationMeta, ReplayResult } from '../types';
 
 declare global {
   interface Window {
@@ -15,6 +15,21 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
 } else {
   window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED = true;
   window.SHORTLINKER_INSPECTOR_ACTIVE = false; // Default: OFF
+
+  // Volatile in-memory store for ONE captured Related Video mutation
+  // NEVER persisted to storage, files, or external networks.
+  interface StoredRawMutation {
+    url: string;
+    method: string;
+    headers: any;
+    rawBody: any;
+    sourceVideoId: string;
+    targetVideoId: string;
+    timestamp: string;
+    flowType?: string;
+    hasAttestation: boolean;
+  }
+  let lastRawMutation: StoredRawMutation | null = null;
 
   console.info(
     '%c[ShortLinker Interceptor] Passive network listener installed in MAIN world (Status: OFF).',
@@ -33,13 +48,11 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
   }) as EventListener);
 
   function broadcastCapture(captured: CapturedRequest) {
-    // Dispatch sanitized event to isolated-world content script UI
     const customEvent = new CustomEvent(BRIDGE_EVENTS.CAPTURE, {
       detail: captured
     });
     document.dispatchEvent(customEvent);
 
-    // Also log to console for instant developer feedback
     const style = 'background: #0f172a; color: #a855f7; font-weight: bold; padding: 2px 6px; border-radius: 4px;';
     console.groupCollapsed(`%c[ShortLinker Interceptor] Candidate Captured: [${captured.method}] ${captured.pathname}`, style);
     console.log('%cURL:', 'font-weight: bold;', captured.url);
@@ -47,6 +60,18 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     console.log('%cSafe Headers:', 'font-weight: bold;', captured.safeHeaders);
     console.log('%cSanitized Request Body (%s):', 'font-weight: bold;', captured.bodyType, captured.sanitizedBody);
     console.groupEnd();
+  }
+
+  function broadcastMutationDetected(meta: RelatedVideoMutationMeta) {
+    const customEvent = new CustomEvent(BRIDGE_EVENTS.MUTATION_DETECTED, {
+      detail: meta
+    });
+    document.dispatchEvent(customEvent);
+
+    console.info(
+      `%c[ShortLinker Interceptor] Related Video Mutation Detected: Short [${meta.sourceVideoId}] → Target [${meta.targetVideoId}]`,
+      'background: #064e3b; color: #34d399; font-weight: bold; padding: 3px 8px; border-radius: 4px;'
+    );
   }
 
   // ==========================================
@@ -72,7 +97,6 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
         method = input.method;
         reqHeaders = input.headers;
         contentType = input.headers.get('content-type') || '';
-        // Safely read body by cloning the Request without consuming the original
         if (input.body && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD') {
           try {
             const clone = input.clone();
@@ -140,6 +164,34 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
           };
 
           broadcastCapture(captured);
+
+          // Check specifically for Related Video mutation
+          const mutationCheck = isRelatedVideoMutation(urlStr, method, rawBody);
+          if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
+            // Save raw request into volatile memory ONLY
+            lastRawMutation = {
+              url: urlStr,
+              method: method.toUpperCase(),
+              headers: reqHeaders,
+              rawBody,
+              sourceVideoId: mutationCheck.sourceVideoId,
+              targetVideoId: mutationCheck.targetVideoId,
+              timestamp: new Date().toLocaleTimeString(),
+              flowType: mutationCheck.flowType,
+              hasAttestation: Boolean(mutationCheck.hasAttestation)
+            };
+
+            // Broadcast safe metadata to Isolated UI (credentials strictly excluded)
+            broadcastMutationDetected({
+              sourceVideoId: mutationCheck.sourceVideoId,
+              targetVideoId: mutationCheck.targetVideoId,
+              timestamp: new Date().toLocaleTimeString(),
+              httpStatus: response.status,
+              pathname: parsedUrl.pathname,
+              flowType: mutationCheck.flowType,
+              hasAttestation: Boolean(mutationCheck.hasAttestation)
+            });
+          }
         } catch (captureErr) {
           console.warn('[ShortLinker Interceptor] Error capturing fetch candidate:', captureErr);
         }
@@ -233,6 +285,31 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
               };
 
               broadcastCapture(captured);
+
+              const mutationCheck = isRelatedVideoMutation(meta.url, meta.method, body);
+              if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
+                lastRawMutation = {
+                  url: meta.url,
+                  method: meta.method.toUpperCase(),
+                  headers: meta.headers,
+                  rawBody: body,
+                  sourceVideoId: mutationCheck.sourceVideoId,
+                  targetVideoId: mutationCheck.targetVideoId,
+                  timestamp: new Date().toLocaleTimeString(),
+                  flowType: mutationCheck.flowType,
+                  hasAttestation: Boolean(mutationCheck.hasAttestation)
+                };
+
+                broadcastMutationDetected({
+                  sourceVideoId: mutationCheck.sourceVideoId,
+                  targetVideoId: mutationCheck.targetVideoId,
+                  timestamp: new Date().toLocaleTimeString(),
+                  httpStatus: this.status,
+                  pathname: parsedUrl.pathname,
+                  flowType: mutationCheck.flowType,
+                  hasAttestation: Boolean(mutationCheck.hasAttestation)
+                });
+              }
             } catch (captureErr) {
               console.warn('[ShortLinker Interceptor] Error capturing XHR candidate:', captureErr);
             }
@@ -244,4 +321,97 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
 
     return originalSend.call(this, body);
   };
+
+  // ==========================================
+  // 4. Controlled Single-Mutation Replay
+  // ==========================================
+  document.addEventListener(BRIDGE_EVENTS.REPLAY_REQUEST, async () => {
+    if (!lastRawMutation) {
+      const emptyResult: ReplayResult = {
+        success: false,
+        httpStatus: 0,
+        statusText: 'No captured mutation in memory',
+        durationMs: 0,
+        sourceVideoId: '',
+        targetVideoId: '',
+        timestamp: new Date().toLocaleTimeString(),
+        sanitizedResponseSnippet: 'No active Related Video mutation has been captured yet.'
+      };
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_RESPONSE, { detail: emptyResult }));
+      return;
+    }
+
+    console.info(
+      `%c[ShortLinker Replay] Executing single-video replay: Short [${lastRawMutation.sourceVideoId}] → Target [${lastRawMutation.targetVideoId}]`,
+      'background: #1e3a8a; color: #60a5fa; font-weight: bold; padding: 3px 8px; border-radius: 4px;'
+    );
+
+    const startTime = performance.now();
+    try {
+      // Replay in MAIN-world page context using the captured headers and body
+      const response = await originalFetch(lastRawMutation.url, {
+        method: lastRawMutation.method,
+        headers: lastRawMutation.headers,
+        body: lastRawMutation.rawBody,
+        credentials: 'same-origin'
+      });
+
+      const durationMs = Math.round(performance.now() - startTime);
+      const responseText = await response.text();
+
+      let sanitizedSnippet = '';
+      let attestationRejected = false;
+
+      try {
+        const parsed = JSON.parse(responseText);
+        if (parsed.error || response.status >= 400) {
+          const errDetail = JSON.stringify(parsed.error || '').toLowerCase();
+          if (errDetail.includes('attestation') || errDetail.includes('challenge') || errDetail.includes('token')) {
+            attestationRejected = true;
+          }
+        }
+        sanitizedSnippet = JSON.stringify(redactSensitiveData(parsed), null, 2);
+        if (sanitizedSnippet.length > 600) {
+          sanitizedSnippet = sanitizedSnippet.slice(0, 600) + '\n... (truncated)';
+        }
+      } catch {
+        sanitizedSnippet = responseText.slice(0, 300);
+      }
+
+      const isSuccess = response.ok && response.status === 200;
+
+      const result: ReplayResult = {
+        success: isSuccess,
+        httpStatus: response.status,
+        statusText: response.statusText || (isSuccess ? 'OK' : 'Error'),
+        durationMs,
+        sourceVideoId: lastRawMutation.sourceVideoId,
+        targetVideoId: lastRawMutation.targetVideoId,
+        timestamp: new Date().toLocaleTimeString(),
+        sanitizedResponseSnippet: sanitizedSnippet,
+        attestationRejected
+      };
+
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_RESPONSE, { detail: result }));
+
+      console.info(
+        `%c[ShortLinker Replay] Result: ${isSuccess ? 'SUCCESS' : 'FAILED'} (HTTP ${response.status})`,
+        `font-weight: bold; color: ${isSuccess ? '#22c55e' : '#ef4444'};`,
+        result
+      );
+    } catch (err: any) {
+      const durationMs = Math.round(performance.now() - startTime);
+      const result: ReplayResult = {
+        success: false,
+        httpStatus: 0,
+        statusText: 'Network / Fetch Exception',
+        durationMs,
+        sourceVideoId: lastRawMutation.sourceVideoId,
+        targetVideoId: lastRawMutation.targetVideoId,
+        timestamp: new Date().toLocaleTimeString(),
+        sanitizedResponseSnippet: err?.message || 'Unknown network error'
+      };
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_RESPONSE, { detail: result }));
+    }
+  });
 }
