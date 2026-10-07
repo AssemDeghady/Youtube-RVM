@@ -22,12 +22,18 @@ Everything in this project is built around privacy, simplicity, and keeping comp
 
 • Free and open source forever: No subscriptions, no locked tiers, and no hidden telemetry.
 
-## Current status: Shorts List View MVP
+## Current status: Searchable Video Picker & List View MVP
 
-The extension now operates directly from the YouTube Studio Shorts List View:
+The extension operates directly from the YouTube Studio Shorts List View:
 studio.youtube.com/channel/.../videos/short
 
-Creators can select multiple Shorts using YouTube Studio's own table checkboxes, paste one target video URL or ID, and assign the Related Video to all selected Shorts sequentially without ever opening individual video details pages.
+Creators can:
+1. Select one or more Shorts using YouTube Studio's own table checkboxes.
+2. Click Select a video to open a searchable picker containing their channel's videos.
+3. Search instantly by title or video ID.
+4. Pick any target video, which displays with its title and thumbnail.
+5. Assign the chosen Related Video sequentially to all selected Shorts without opening individual video details pages.
+6. Use manual URL or ID entry as an optional fallback.
 
 ## Project overview
 
@@ -36,11 +42,11 @@ youtube_rvm/
   dist/                  Compiled extension ready to load into Chrome
   public/                Manifest and icon assets
   scripts/build.mjs      Vite build script producing self-contained bundles
-  scripts/test.mjs       Automated unit test suite
+  scripts/test.mjs       Automated unit test suite covering picker & mutation flows
   src/
-    common/              Filters, YouTube URL normalizer, and sensitive data redactor
-    content/             Studio detector, selection tracker, and panel UI
-    interceptor/         MAIN-world fetch observer and sequential mutation executor
+    common/              Filters, catalog parser, in-memory store, URL normalizer
+    content/             Studio detector, selection tracker, and picker panel UI
+    interceptor/         MAIN-world fetch observer, catalog loader, and executor
     types/               Shared TypeScript interfaces
   package.json           Dependencies and build scripts
   tsconfig.json          Strict TypeScript configuration
@@ -73,20 +79,21 @@ If you want the bundler to automatically rebuild whenever you make changes to th
 5. Choose the dist directory inside this project folder.
 6. The extension is now active and ready.
 
-## How to use the Shorts List View Assigner
+## How to use the Searchable Video Assigner
 
 1. Open studio.youtube.com in your browser while signed in.
 2. Navigate to Content in the left menu, then switch to the Shorts tab.
-3. In the bottom right corner, open the ShortLinker card. The Shorts Linker tab is active.
-4. Select one or more Shorts using YouTube Studio's regular table checkboxes.
-5. Paste any target video into the Related Video input box:
-   • Regular watch link: https://www.youtube.com/watch?v=VIDEO_ID
-   • Shortened link: https://youtu.be/VIDEO_ID
-   • Shorts link: https://www.youtube.com/shorts/VIDEO_ID
-   • Or raw 11-character video ID
-6. Safety First: If you select 1 Short, click Test Update on this Short to verify that your active session accepts the update.
-7. Once verified, select any number of Shorts and click Assign to Shorts.
-8. The extension executes each update sequentially with a gentle delay, showing live per-video progress and a Stop button to pause at any time.
+3. In the bottom right corner, open the ShortLinker card.
+4. Select one or more Shorts using YouTube Studio's table checkboxes.
+5. Under Related Video, click Select a video.
+6. A searchable picker opens showing your channel's videos:
+   • Type in the search box to filter instantly by title or video ID
+   • Click any video to select it as the target Related Video
+   • The picker closes, and your selected video's title and thumbnail are shown
+7. Optional Fallback: If you ever need to link a video not listed, click "Can't find your video? Enter URL or ID" to paste a link directly.
+8. Safety First: If you select 1 Short, click Test Update on this Short to verify that your active session accepts the update.
+9. Once verified, select any number of Shorts and click Assign to Shorts.
+10. The extension executes each update sequentially with a gentle delay, showing live per-video progress and a Stop button to pause at any time.
 
 ## Built-in safety precautions
 
@@ -98,7 +105,7 @@ The extension was engineered with strict guardrails:
 
 • Deep automatic redaction: All sensitive keys such as tokens, auth hashes, cookies, and session strings are recursively replaced with redacted placeholders in all diagnostic views.
 
-• In-memory only: Captured requests live in browser memory during your session. Nothing is ever written to disk, local storage, or external logs.
+• In-memory only: Captured requests and video catalogs live in browser memory during your session. Nothing is ever written to disk, local storage, or external logs.
 
 ## Contributing
 

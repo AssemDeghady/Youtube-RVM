@@ -1,6 +1,7 @@
 import { filterSafeHeaders, parseAndSanitizeBody, redactSensitiveData } from '../common/sanitizer';
 import { isCandidateRequest, isRelatedVideoMutation } from '../common/filter';
 import { buildRelatedVideoPayload } from '../common/youtube';
+import { parseCreatorVideosResponse } from '../common/catalog-parser';
 import {
   BRIDGE_EVENTS,
   CapturedRequest,
@@ -8,7 +9,8 @@ import {
   ReplayResult,
   MutationExecutePayload,
   MutationItemProgress,
-  MutationJobSummary
+  MutationJobSummary,
+  TargetVideo
 } from '../types';
 
 declare global {
@@ -42,10 +44,28 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
   let lastRawMutation: StoredRawMutation | null = null;
   let activeJobCancellationFlag = false;
 
+  // In-memory catalog of creator's videos (volatily cached in MAIN world)
+  const inMemoryCatalogMap: Map<string, TargetVideo> = new Map();
+  let lastListVideosRequestTemplate: {
+    url: string;
+    headers: any;
+    basePayload: any;
+  } | null = null;
+
   console.info(
     '%c[ShortLinker Interceptor] Passive network listener installed in MAIN world (Status: OFF).',
     'background: #1e293b; color: #38bdf8; font-weight: bold; padding: 2px 6px; border-radius: 4px;'
   );
+
+  // Broadcast catalog updates to isolated-world UI
+  function broadcastCatalogUpdated() {
+    const videos = Array.from(inMemoryCatalogMap.values());
+    document.dispatchEvent(
+      new CustomEvent(BRIDGE_EVENTS.CATALOG_RESPONSE, {
+        detail: { videos }
+      })
+    );
+  }
 
   // Listen for control commands from Isolated World UI
   document.addEventListener(BRIDGE_EVENTS.CONTROL, ((event: CustomEvent<{ enabled: boolean }>) => {
@@ -97,6 +117,64 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     });
     document.dispatchEvent(responseEvent);
   });
+
+  // Handle catalog requests from UI
+  document.addEventListener(BRIDGE_EVENTS.CATALOG_REQUEST, () => {
+    broadcastCatalogUpdated();
+    // If catalog is currently empty, attempt to fetch videos
+    if (inMemoryCatalogMap.size === 0) {
+      fetchCreatorVideos().catch(() => {});
+    }
+  });
+
+  // Handle refresh catalog request
+  document.addEventListener(BRIDGE_EVENTS.REFRESH_CATALOG, () => {
+    fetchCreatorVideos().catch(() => {});
+  });
+
+  async function fetchCreatorVideos(): Promise<TargetVideo[]> {
+    const template = lastListVideosRequestTemplate;
+    const mutationTemplate = lastRawMutation;
+
+    const url = template?.url || 'https://studio.youtube.com/youtubei/v1/creator/list_creator_videos';
+    const headers = template?.headers || mutationTemplate?.headers || {
+      'content-type': 'application/json',
+      'x-youtube-client-name': '62'
+    };
+
+    const context = template?.basePayload?.context || mutationTemplate?.rawBody?.context;
+    const payload: any = {
+      pageSize: 50
+    };
+    if (context) {
+      payload.context = context;
+    }
+
+    try {
+      const res = await originalFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        credentials: 'same-origin'
+      });
+
+      if (res.ok) {
+        const text = await res.text();
+        const json = JSON.parse(text);
+        const videos = parseCreatorVideosResponse(json);
+        if (videos.length > 0) {
+          for (const v of videos) {
+            inMemoryCatalogMap.set(v.id, v);
+          }
+          broadcastCatalogUpdated();
+        }
+        return videos;
+      }
+    } catch (err) {
+      console.warn('[ShortLinker Interceptor] Error fetching creator videos:', err);
+    }
+    return [];
+  }
 
   // ==========================================
   // 2. Passive window.fetch Interception
@@ -158,6 +236,40 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
       response = await originalFetch.apply(this, [input, init]);
     } catch (fetchErr) {
       throw fetchErr;
+    }
+
+    // Passively observe creator video list responses
+    if (
+      urlStr.includes('/creator/list_creator_videos') ||
+      urlStr.includes('/creator/get_creator_videos')
+    ) {
+      try {
+        let parsedBody = rawBody;
+        if (typeof rawBody === 'string') {
+          try {
+            parsedBody = JSON.parse(rawBody);
+          } catch {}
+        }
+        lastListVideosRequestTemplate = {
+          url: urlStr,
+          headers: reqHeaders,
+          basePayload: parsedBody
+        };
+
+        const resClone = response.clone();
+        resClone.text().then((text) => {
+          try {
+            const json = JSON.parse(text);
+            const videos = parseCreatorVideosResponse(json);
+            if (videos.length > 0) {
+              for (const v of videos) {
+                inMemoryCatalogMap.set(v.id, v);
+              }
+              broadcastCatalogUpdated();
+            }
+          } catch {}
+        });
+      } catch {}
     }
 
     // Process potential Related Video mutations (always cache template if detected)
@@ -290,6 +402,26 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
         'loadend',
         () => {
           try {
+            // Passively observe creator video list in XHR
+            if (
+              meta.url.includes('/creator/list_creator_videos') ||
+              meta.url.includes('/creator/get_creator_videos')
+            ) {
+              try {
+                const text = this.responseText;
+                if (text) {
+                  const json = JSON.parse(text);
+                  const videos = parseCreatorVideosResponse(json);
+                  if (videos.length > 0) {
+                    for (const v of videos) {
+                      inMemoryCatalogMap.set(v.id, v);
+                    }
+                    broadcastCatalogUpdated();
+                  }
+                }
+              } catch {}
+            }
+
             const mutationCheck = isRelatedVideoMutation(meta.url, meta.method, body);
             if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
               let parsedBodyForStorage = body;
@@ -528,7 +660,6 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
 
       const startTime = performance.now();
       try {
-        // Construct request payload with this specific Short ID
         const reqBody = buildRelatedVideoPayload(
           lastRawMutation.rawBody,
           sourceShortId,
@@ -586,7 +717,6 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
         items.push(itemResult);
         document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
 
-        // Sequential delay between requests if more items remain
         if (i < sourceShortIds.length - 1 && !activeJobCancellationFlag && delayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }

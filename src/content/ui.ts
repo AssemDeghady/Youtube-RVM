@@ -6,9 +6,11 @@ import {
   MutationItemProgress,
   MutationJobSummary,
   MutationExecutePayload,
+  TargetVideo,
   BRIDGE_EVENTS
 } from '../types';
 import { normalizeYouTubeVideoId } from '../common/youtube';
+import { VideoCatalogStore } from '../common/video-catalog';
 import { isShortsListView } from './detector';
 
 export class DevIndicatorUI {
@@ -17,6 +19,16 @@ export class DevIndicatorUI {
   private currentContext: StudioPageContext | null = null;
   private navCount = 0;
   private isMinimized = false;
+
+  // Video Catalog & Target Selection
+  private catalogStore: VideoCatalogStore = new VideoCatalogStore();
+  private selectedTargetVideo: TargetVideo | null = null;
+  private normalizedTargetId: string | null = null;
+  private isPickerOpen = false;
+  private searchQuery = '';
+  private isManualFallbackOpen = false;
+  private manualInputVal = '';
+  private manualInputError: string | null = null;
 
   // Network Inspector State
   private isCaptureActive = false;
@@ -27,9 +39,6 @@ export class DevIndicatorUI {
 
   // Shorts List View State
   private selectedShortIds: string[] = [];
-  private relatedVideoInput = '';
-  private normalizedTargetId: string | null = null;
-  private inputValidationError: string | null = null;
   private hasTemplate = false;
   private hasSingleTestSucceeded = false;
   private isGateBypassed = false;
@@ -57,7 +66,6 @@ export class DevIndicatorUI {
 
     document.body.appendChild(this.hostElement);
 
-    // Initial tab selection
     if (isShortsListView()) {
       this.activeTab = 'shorts';
     } else {
@@ -67,7 +75,20 @@ export class DevIndicatorUI {
     // Check template status in MAIN world
     document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.TEMPLATE_STATUS_REQUEST));
 
-    // Listen to bridge events
+    // Request creator videos catalog from MAIN world
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.CATALOG_REQUEST));
+
+    // Extract any existing DOM video rows as immediate fallback
+    this.catalogStore.extractFromDom();
+
+    // Listen for catalog updates from MAIN world
+    document.addEventListener(BRIDGE_EVENTS.CATALOG_RESPONSE, ((event: CustomEvent<{ videos: TargetVideo[] }>) => {
+      if (event.detail && Array.isArray(event.detail.videos)) {
+        this.catalogStore.addVideos(event.detail.videos);
+        this.render();
+      }
+    }) as EventListener);
+
     document.addEventListener(BRIDGE_EVENTS.TEMPLATE_STATUS_RESPONSE, ((event: CustomEvent<{ hasTemplate: boolean }>) => {
       if (event.detail) {
         this.hasTemplate = event.detail.hasTemplate;
@@ -141,12 +162,13 @@ export class DevIndicatorUI {
     if (isShortsListView() && this.activeTab === 'studio') {
       this.activeTab = 'shorts';
     }
+    // Refresh DOM video catalog on route change
+    this.catalogStore.extractFromDom();
     this.render();
   }
 
   public updateSelection(selectedIds: string[]): void {
     this.selectedShortIds = selectedIds;
-    // Reset test / job state when selection changes
     if (this.singleTestState === 'done') {
       this.singleTestState = 'idle';
       this.singleTestResult = null;
@@ -167,22 +189,48 @@ export class DevIndicatorUI {
     this.render();
   }
 
-  private setTargetVideoInput(val: string): void {
-    this.relatedVideoInput = val;
+  private selectTargetVideo(video: TargetVideo): void {
+    this.selectedTargetVideo = video;
+    this.normalizedTargetId = video.id;
+    this.manualInputVal = '';
+    this.manualInputError = null;
+    this.isPickerOpen = false;
+    this.render();
+  }
+
+  private clearTargetVideo(): void {
+    this.selectedTargetVideo = null;
+    this.normalizedTargetId = null;
+    this.manualInputVal = '';
+    this.manualInputError = null;
+    this.render();
+  }
+
+  private handleManualInput(val: string): void {
+    this.manualInputVal = val;
     if (!val.trim()) {
-      this.normalizedTargetId = null;
-      this.inputValidationError = null;
+      this.clearTargetVideo();
+      return;
+    }
+    const res = normalizeYouTubeVideoId(val);
+    if (res.isValid && res.videoId) {
+      this.normalizedTargetId = res.videoId;
+      this.manualInputError = null;
+      this.selectedTargetVideo = {
+        id: res.videoId,
+        title: `Manual Video (${res.videoId})`,
+        thumbnailUrl: `https://i.ytimg.com/vi/${res.videoId}/mqdefault.jpg`
+      };
     } else {
-      const res = normalizeYouTubeVideoId(val);
-      if (res.isValid && res.videoId) {
-        this.normalizedTargetId = res.videoId;
-        this.inputValidationError = null;
-      } else {
-        this.normalizedTargetId = null;
-        this.inputValidationError = res.error || 'Invalid YouTube URL or ID';
-      }
+      this.normalizedTargetId = null;
+      this.selectedTargetVideo = null;
+      this.manualInputError = res.error || 'Invalid YouTube URL or ID';
     }
     this.render();
+  }
+
+  private requestCatalogRefresh(): void {
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REFRESH_CATALOG));
   }
 
   private executeSingleShortTest(): void {
@@ -211,7 +259,6 @@ export class DevIndicatorUI {
     this.bulkItemsProgress.clear();
     this.currentJobId = `bulk_${Date.now()}`;
 
-    // Initialize queued items
     for (const id of this.selectedShortIds) {
       this.bulkItemsProgress.set(id, {
         sourceShortId: id,
@@ -280,13 +327,14 @@ export class DevIndicatorUI {
         line-height: 1.4;
       }
       .panel-container {
+        position: relative;
         background: #18181b;
         color: #f4f4f5;
         border: 1px solid #3f3f46;
         border-radius: 10px;
         box-shadow: 0 14px 30px -4px rgba(0, 0, 0, 0.7), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
         padding: 12px 14px;
-        width: 410px;
+        width: 420px;
         max-width: 92vw;
         max-height: 88vh;
         display: flex;
@@ -379,48 +427,175 @@ export class DevIndicatorUI {
         border-radius: 4px;
       }
 
-      /* Form elements */
-      .form-group {
+      /* Card boxes */
+      .card-box {
+        background: #202023;
+        border: 1px solid #3f3f46;
+        border-radius: 6px;
+        padding: 10px;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 8px;
       }
-      .form-label {
-        font-size: 11px;
-        color: #a1a1aa;
-        font-weight: 500;
-        display: flex;
-        justify-content: space-between;
-      }
-      .input-text {
-        background: #09090b;
-        border: 1px solid #3f3f46;
-        color: #f4f4f5;
-        border-radius: 6px;
-        padding: 7px 10px;
-        font-size: 12px;
-        font-family: inherit;
-        outline: none;
-        transition: border-color 0.15s ease;
-      }
-      .input-text:focus {
+      .card-box.highlight {
         border-color: #0284c7;
       }
-      .input-valid {
-        border-color: #059669 !important;
+
+      /* Video Picker Display */
+      .selected-video-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px;
+        background: #09090b;
+        border: 1px solid #059669;
+        border-radius: 6px;
       }
-      .input-invalid {
-        border-color: #dc2626 !important;
+      .selected-thumb {
+        width: 64px;
+        height: 36px;
+        border-radius: 4px;
+        object-fit: cover;
+        background: #27272a;
+        flex-shrink: 0;
       }
-      .validation-msg {
+      .selected-info {
+        flex: 1;
+        overflow: hidden;
+      }
+      .selected-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #f4f4f5;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .selected-sub {
         font-size: 10px;
+        color: #9ca3af;
+        margin-top: 1px;
+      }
+      .text-link {
+        background: none;
+        border: none;
+        color: #38bdf8;
+        font-size: 10px;
+        cursor: pointer;
+        padding: 0;
+        text-decoration: underline;
+      }
+      .text-link:hover {
+        color: #7dd3fc;
+      }
+
+      /* Modal Popover */
+      .modal-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(15, 23, 42, 0.95);
+        backdrop-filter: blur(6px);
+        border-radius: 10px;
+        display: flex;
+        flex-direction: column;
+        padding: 12px;
+        z-index: 100;
+        box-shadow: inset 0 0 0 1px #3f3f46;
+      }
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .modal-title {
+        font-weight: 600;
+        font-size: 12px;
+        color: #ffffff;
+      }
+      .modal-close-btn {
+        background: transparent;
+        border: none;
+        color: #a1a1aa;
+        font-size: 16px;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .modal-close-btn:hover {
+        color: #ffffff;
+      }
+      .search-input {
+        background: #09090b;
+        border: 1px solid #3f3f46;
+        border-radius: 6px;
+        padding: 8px 10px;
+        color: #ffffff;
+        font-size: 12px;
+        outline: none;
+        margin-bottom: 8px;
+      }
+      .search-input:focus {
+        border-color: #0284c7;
+      }
+      .video-results-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-right: 2px;
+      }
+      .video-results-list::-webkit-scrollbar {
+        width: 4px;
+      }
+      .video-results-list::-webkit-scrollbar-thumb {
+        background: #3f3f46;
+        border-radius: 4px;
+      }
+      .video-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        background: #18181b;
+        border: 1px solid #27272a;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .video-item:hover {
+        background: #27272a;
+        border-color: #0284c7;
+      }
+      .video-item-thumb {
+        width: 56px;
+        height: 32px;
+        border-radius: 4px;
+        object-fit: cover;
+        background: #09090b;
+        flex-shrink: 0;
+      }
+      .video-item-info {
+        flex: 1;
+        overflow: hidden;
+      }
+      .video-item-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #f4f4f5;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .video-item-meta {
+        font-size: 10px;
+        color: #a1a1aa;
+        display: flex;
+        gap: 6px;
         margin-top: 2px;
-      }
-      .validation-msg.valid {
-        color: #34d399;
-      }
-      .validation-msg.invalid {
-        color: #f87171;
       }
 
       /* Badges & Buttons */
@@ -482,18 +657,23 @@ export class DevIndicatorUI {
         color: #e4e4e7;
         border: 1px solid #3f3f46;
       }
-
-      /* Card boxes */
-      .card-box {
-        background: #202023;
-        border: 1px solid #3f3f46;
-        border-radius: 6px;
-        padding: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
+      .btn-sm {
+        padding: 3px 8px;
+        font-size: 10px;
       }
-      .card-box.highlight {
+
+      /* Form input */
+      .input-text {
+        background: #09090b;
+        border: 1px solid #3f3f46;
+        color: #f4f4f5;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 11px;
+        font-family: inherit;
+        outline: none;
+      }
+      .input-text:focus {
         border-color: #0284c7;
       }
 
@@ -574,7 +754,7 @@ export class DevIndicatorUI {
     }
 
     // -------------------------------------------------------------
-    // SHORTS LIST VIEW CONTENT
+    // SHORTS LIST VIEW TAB CONTENT
     // -------------------------------------------------------------
     let shortsTabContent = '';
 
@@ -590,7 +770,6 @@ export class DevIndicatorUI {
         </div>
       `;
     } else {
-      // Template warning if not captured yet
       const templateNoticeHtml = !this.hasTemplate
         ? `
         <div class="card-box" style="border-color: #d97706; background: rgba(217, 119, 6, 0.1);">
@@ -604,36 +783,72 @@ export class DevIndicatorUI {
         </div>`
         : '';
 
-      // Target Video Input Section
-      const targetInputSectionHtml = `
-        <div class="form-group">
-          <div class="form-label">
-            <span>Target Related Video:</span>
+      // Target Related Video Selection UI
+      let targetSelectorHtml = '';
+      if (this.selectedTargetVideo) {
+        targetSelectorHtml = `
+          <div class="card-box">
+            <div style="font-size: 11px; font-weight: 600; color: #a1a1aa; display: flex; justify-content: space-between;">
+              <span>Selected Related Video:</span>
+              <button class="text-link" id="btn-clear-target" style="color: #f87171;">Clear</button>
+            </div>
+            <div class="selected-video-card">
+              <img
+                src="${escapeHtml(this.selectedTargetVideo.thumbnailUrl || `https://i.ytimg.com/vi/${this.selectedTargetVideo.id}/mqdefault.jpg`)}"
+                class="selected-thumb"
+                alt="Thumbnail"
+              />
+              <div class="selected-info">
+                <div class="selected-title" title="${escapeHtml(this.selectedTargetVideo.title)}">
+                  ${escapeHtml(this.selectedTargetVideo.title)}
+                </div>
+                <div class="selected-sub">
+                  ${this.selectedTargetVideo.duration ? `${this.selectedTargetVideo.duration} &bull; ` : ''}ID: <span class="mono">${this.selectedTargetVideo.id}</span>
+                </div>
+              </div>
+              <button class="btn btn-secondary btn-sm" id="btn-open-picker">Change</button>
+            </div>
+          </div>
+        `;
+      } else {
+        targetSelectorHtml = `
+          <div class="card-box">
+            <div style="font-size: 11px; font-weight: 600; color: #a1a1aa;">
+              Related Video:
+            </div>
+            <button class="btn btn-primary" id="btn-open-picker" style="width: 100%; padding: 8px 12px;">
+              🔍 Select a video
+            </button>
+            <div style="font-size: 10px; color: #71717a; text-align: center;">
+              Choose the video that should be linked to the selected Shorts.
+            </div>
+            <div style="text-align: center; margin-top: 2px;">
+              <button class="text-link" id="btn-toggle-manual">
+                ${this.isManualFallbackOpen ? "Hide manual entry" : "Can't find your video? Enter URL or ID"}
+              </button>
+            </div>
             ${
-              this.normalizedTargetId
-                ? `<span class="badge-pill badge-green">ID: ${this.normalizedTargetId}</span>`
+              this.isManualFallbackOpen
+                ? `
+              <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">
+                <input
+                  type="text"
+                  id="manual-url-input"
+                  class="input-text"
+                  placeholder="Paste YouTube watch URL, Shorts URL, or ID"
+                  value="${escapeHtml(this.manualInputVal)}"
+                />
+                ${
+                  this.manualInputError
+                    ? `<div style="color: #f87171; font-size: 10px;">${escapeHtml(this.manualInputError)}</div>`
+                    : ''
+                }
+              </div>`
                 : ''
             }
           </div>
-          <input
-            type="text"
-            id="target-video-input"
-            class="input-text ${
-              this.normalizedTargetId ? 'input-valid' : this.inputValidationError ? 'input-invalid' : ''
-            }"
-            placeholder="Paste YouTube watch URL, Shorts URL, or 11-char ID"
-            value="${escapeHtml(this.relatedVideoInput)}"
-            ${this.bulkJobState === 'running' || this.singleTestState === 'running' ? 'disabled' : ''}
-          />
-          ${
-            this.normalizedTargetId
-              ? `<div class="validation-msg valid">✓ Valid YouTube Video (${this.normalizedTargetId})</div>`
-              : this.inputValidationError
-              ? `<div class="validation-msg invalid">✗ ${escapeHtml(this.inputValidationError)}</div>`
-              : '<div class="validation-msg" style="color: #71717a;">Accepts watch URLs, youtu.be, shorts URLs, or raw 11-char IDs.</div>'
-          }
-        </div>
-      `;
+        `;
+      }
 
       // Selection Summary Bar
       const selectionBarHtml = `
@@ -696,7 +911,7 @@ export class DevIndicatorUI {
               <div style="font-size: 11px; color: #f3f4f6; line-height: 1.4;">
                 You are about to change:<br>
                 Short: <span class="mono">${singleShortId}</span><br>
-                Related Video: <span class="mono highlight">${this.normalizedTargetId}</span>
+                Related Video: <span class="mono highlight">${this.selectedTargetVideo?.title || this.normalizedTargetId}</span>
               </div>
               <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
                 <button class="btn btn-secondary" id="btn-single-cancel">Cancel</button>
@@ -747,7 +962,7 @@ export class DevIndicatorUI {
           `;
         }
       } else {
-        // MULTI-SHORT BULK PATH (Gated until single test succeeds or user intentionally proceeds)
+        // MULTI-SHORT BULK PATH
         const isGated = !this.hasSingleTestSucceeded && !this.isGateBypassed;
 
         if (this.bulkJobState === 'idle') {
@@ -775,7 +990,7 @@ export class DevIndicatorUI {
                   <span class="badge-pill badge-green">Ready</span>
                 </div>
                 <div style="font-size: 11px; color: #a1a1aa;">
-                  Assign Related Video <span class="mono highlight">${this.normalizedTargetId || '...'}</span> to all <b>${selectedCount}</b> selected Shorts sequentially.
+                  Assign <span class="mono highlight">${this.selectedTargetVideo?.title || this.normalizedTargetId || '...'}</span> to all <b>${selectedCount}</b> selected Shorts sequentially.
                 </div>
                 <button
                   class="btn btn-primary"
@@ -870,14 +1085,74 @@ export class DevIndicatorUI {
 
       shortsTabContent = `
         ${templateNoticeHtml}
-        ${targetInputSectionHtml}
+        ${targetSelectorHtml}
         ${selectionBarHtml}
         ${executionSectionHtml}
       `;
     }
 
     // -------------------------------------------------------------
-    // NETWORK INSPECTOR CONTENT (Preserved for reverse-engineering)
+    // VIDEO PICKER MODAL OVERLAY
+    // -------------------------------------------------------------
+    let pickerModalHtml = '';
+    if (this.isPickerOpen) {
+      const searchResults = this.catalogStore.search(this.searchQuery, 50);
+      const totalCatalogCount = this.catalogStore.count();
+
+      const resultsItemsHtml =
+        searchResults.length === 0
+          ? `
+          <div style="text-align: center; color: #71717a; padding: 24px 8px; font-size: 11px;">
+            ${
+              totalCatalogCount === 0
+                ? 'No videos loaded yet from YouTube Studio.<br><button class="btn btn-secondary btn-sm" id="btn-retry-catalog" style="margin-top: 8px;">Refresh / Load Videos</button>'
+                : `No videos matching "${escapeHtml(this.searchQuery)}"`
+            }
+          </div>`
+          : searchResults
+              .map(
+                (v) => `
+          <div class="video-item" data-video-id="${escapeHtml(v.id)}">
+            <img
+              src="${escapeHtml(v.thumbnailUrl || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`)}"
+              class="video-item-thumb"
+              alt="thumb"
+            />
+            <div class="video-item-info">
+              <div class="video-item-title">${escapeHtml(v.title)}</div>
+              <div class="video-item-meta">
+                ${v.duration ? `<span>${escapeHtml(v.duration)}</span> &bull; ` : ''}
+                ${v.videoType ? `<span>${escapeHtml(v.videoType.toUpperCase())}</span> &bull; ` : ''}
+                <span class="mono">${escapeHtml(v.id)}</span>
+              </div>
+            </div>
+          </div>
+        `
+              )
+              .join('');
+
+      pickerModalHtml = `
+        <div class="modal-overlay">
+          <div class="modal-header">
+            <span class="modal-title">Select Related Video (${searchResults.length} / ${totalCatalogCount})</span>
+            <button class="modal-close-btn" id="btn-close-picker">&times;</button>
+          </div>
+          <input
+            type="text"
+            class="search-input"
+            id="picker-search-input"
+            placeholder="🔍 Search by title or video ID..."
+            value="${escapeHtml(this.searchQuery)}"
+          />
+          <div class="video-results-list">
+            ${resultsItemsHtml}
+          </div>
+        </div>
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // NETWORK INSPECTOR TAB CONTENT
     // -------------------------------------------------------------
     const inspectorTabContent = `
       <div class="card-box" style="padding: 8px 10px;">
@@ -949,8 +1224,8 @@ export class DevIndicatorUI {
             : ''
         }
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">SPA Navigations:</span>
-          <span class="mono">${this.navCount}</span>
+          <span style="color: #a1a1aa;">Catalog Videos in Memory:</span>
+          <span class="badge-pill badge-green">${this.catalogStore.count()}</span>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
           <span style="color: #a1a1aa;">Template in Memory:</span>
@@ -963,6 +1238,8 @@ export class DevIndicatorUI {
     this.shadowRoot.innerHTML = `
       <style>${css}</style>
       <div class="panel-container">
+        ${pickerModalHtml}
+
         <div class="header-row">
           <div class="title-group">
             <span class="pulse-dot"></span>
@@ -1022,10 +1299,71 @@ export class DevIndicatorUI {
       this.render();
     });
 
-    // Input binding
-    const inputEl = this.shadowRoot.getElementById('target-video-input') as HTMLInputElement | null;
-    inputEl?.addEventListener('input', (e) => {
-      this.setTargetVideoInput((e.target as HTMLInputElement).value);
+    // Picker Open / Close
+    this.shadowRoot.getElementById('btn-open-picker')?.addEventListener('click', () => {
+      this.isPickerOpen = true;
+      this.searchQuery = '';
+      if (this.catalogStore.count() === 0) {
+        this.requestCatalogRefresh();
+      }
+      this.render();
+      // Auto-focus search input
+      setTimeout(() => {
+        const searchInput = this.shadowRoot?.getElementById('picker-search-input') as HTMLInputElement | null;
+        searchInput?.focus();
+      }, 50);
+    });
+
+    this.shadowRoot.getElementById('btn-close-picker')?.addEventListener('click', () => {
+      this.isPickerOpen = false;
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-clear-target')?.addEventListener('click', () => {
+      this.clearTargetVideo();
+    });
+
+    this.shadowRoot.getElementById('btn-toggle-manual')?.addEventListener('click', () => {
+      this.isManualFallbackOpen = !this.isManualFallbackOpen;
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-retry-catalog')?.addEventListener('click', () => {
+      this.requestCatalogRefresh();
+    });
+
+    // Search input binding
+    const searchInputEl = this.shadowRoot.getElementById('picker-search-input') as HTMLInputElement | null;
+    searchInputEl?.addEventListener('input', (e) => {
+      this.searchQuery = (e.target as HTMLInputElement).value;
+      this.render();
+      // Keep focus after re-render
+      setTimeout(() => {
+        const inp = this.shadowRoot?.getElementById('picker-search-input') as HTMLInputElement | null;
+        if (inp) {
+          inp.focus();
+          inp.selectionStart = inp.selectionEnd = inp.value.length;
+        }
+      }, 10);
+    });
+
+    // Video item selection
+    this.shadowRoot.querySelectorAll<HTMLElement>('.video-item').forEach((itemEl) => {
+      itemEl.addEventListener('click', () => {
+        const vId = itemEl.getAttribute('data-video-id');
+        if (vId) {
+          const video = this.catalogStore.getById(vId);
+          if (video) {
+            this.selectTargetVideo(video);
+          }
+        }
+      });
+    });
+
+    // Manual input binding
+    const manualInputEl = this.shadowRoot.getElementById('manual-url-input') as HTMLInputElement | null;
+    manualInputEl?.addEventListener('input', (e) => {
+      this.handleManualInput((e.target as HTMLInputElement).value);
     });
 
     // Single Short test bindings

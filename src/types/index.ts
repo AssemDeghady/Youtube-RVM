@@ -99,6 +99,15 @@ export interface MutationExecutePayload {
   delayMs?: number;
 }
 
+export interface TargetVideo {
+  id: string;
+  title: string;
+  thumbnailUrl?: string;
+  duration?: string;
+  publishedAt?: string;
+  videoType?: string; // 'upload' | 'short' | 'live' | etc.
+}
+
 export const BRIDGE_EVENTS = {
   CAPTURE: 'shortlinker-network-capture',
   CONTROL: 'shortlinker-control-command',
@@ -110,5 +119,8 @@ export const BRIDGE_EVENTS = {
   MUTATION_COMPLETE: 'shortlinker-mutation-complete',
   CANCEL_MUTATION: 'shortlinker-cancel-mutation',
   TEMPLATE_STATUS_REQUEST: 'shortlinker-template-status-request',
-  TEMPLATE_STATUS_RESPONSE: 'shortlinker-template-status-response'
+  TEMPLATE_STATUS_RESPONSE: 'shortlinker-template-status-response',
+  CATALOG_REQUEST: 'shortlinker-catalog-request',
+  CATALOG_RESPONSE: 'shortlinker-catalog-response',
+  REFRESH_CATALOG: 'shortlinker-refresh-catalog'
 } as const;
