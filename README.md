@@ -1,159 +1,99 @@
-# YouTube Studio Related Video — ShortLinker POC
+# YouTube Related Video Manager
 
-A minimal Manifest V3 Chrome extension technical proof-of-concept for detecting and passively observing YouTube Studio network mutations to reverse-engineer the YouTube Shorts "Related video" link operation.
+A local-first browser extension created to help creators bulk link their YouTube Shorts to long-form videos, directly through their existing YouTube Studio session.
 
----
+## Why this exists
 
-## 🎯 Architecture & Safety Guarantees
+If you create YouTube Shorts to point viewers toward your deep-dive videos, you probably know the pain: you can attach a Related Video to a Short, but YouTube only lets you do it manually, one single video at a time.
 
-This project operates strictly local-first and read-only:
-- **No Backend / Server:** Operates entirely within the user's browser.
-- **No Database:** In-memory data only; zero data persistence.
-- **No YouTube Data API:** No Google Cloud credentials or API keys (the YouTube Data API v3 does not support the Shorts Related Video link).
-- **No OAuth Flow:** Operates inside the user's existing authenticated YouTube Studio browser session.
-- **No Credential Scraping:** Never touches passwords, cookies, or auth tokens.
-- **Strictly Passive Interception:** Monkey-patches `window.fetch` and `XMLHttpRequest` in the MAIN world to observe requests **without altering** any URLs, headers, bodies, credentials, or responses.
-- **No Video Modification:** Does not alter any video data or trigger mutations automatically.
+For anyone managing dozens or hundreds of Shorts, that means hours of repetitive clicking. To make matters worse, Google's official YouTube Data API v3 does not expose the Related Video property anywhere in its endpoints.
 
----
+YouTube RVM was born to solve that. The goal is simple: an open-source, community-driven tool that handles bulk linking right inside your browser, without any middleman.
 
-## 📁 Project Structure
+## Our design principles
+
+Everything in this project is built around privacy, simplicity, and keeping complete control in your hands.
+
+• Local first: Everything runs on your machine inside your browser. There is no remote backend, no external database, and no cloud server collecting your data.
+
+• No API keys or Google Cloud setup: You do not need a developer account, API quotas, or complex OAuth verification screens. The extension simply uses your already-signed-in YouTube Studio tab.
+
+• Complete privacy: We never ask for your Google password, we never touch your session cookies, and we never scrape account credentials.
+
+• Free and open source forever: No subscriptions, no locked tiers, and no hidden telemetry.
+
+## Current status: Research & Proof of Concept
+
+Right now, this repository is in its initial discovery phase. Before we write any automation to update videos, we need to know the exact internal request structure YouTube Studio uses when saving a Related Video.
+
+This repository provides a lightweight Manifest V3 development extension with an integrated passive network inspector. It runs cleanly on YouTube Studio, tracks single-page navigation, and lets developers capture the exact save payload with zero risk of modifying any account data.
+
+## Project overview
 
 ```
 youtube_rvm/
-├── dist/                          # Production build output (load this folder into Chrome)
-│   ├── content.js                 # Standalone isolated-world content script (UI & SPA detector)
-│   ├── content.js.map             # Content script source map
-│   ├── interceptor.js             # Standalone MAIN-world passive network observer
-│   ├── interceptor.js.map         # Interceptor script source map
-│   ├── icons/                     # Extension icons (16px, 48px, 128px)
-│   └── manifest.json              # Manifest V3 extension configuration
-├── public/
-│   ├── icons/                     # Extension icons
-│   └── manifest.json              # Source Manifest V3 configuration
-├── scripts/
-│   └── build.mjs                  # Programmatic Vite multi-target build script
-├── src/
-│   ├── common/
-│   │   ├── filter.ts              # Conservative endpoint keyword filtering
-│   │   └── sanitizer.ts           # Recursive sensitive data & token redactor
-│   ├── content/
-│   │   ├── detector.ts            # Studio URL & DOM context parser
-│   │   ├── index.ts               # Isolated content script entry point
-│   │   ├── navigation.ts          # SPA navigation observer
-│   │   └── ui.ts                  # Shadow DOM development panel with Network Inspector
-│   ├── interceptor/
-│   │   └── index.ts               # MAIN-world passive fetch / XHR interceptor
-│   └── types/
-│       └── index.ts               # Shared TypeScript interfaces & bridge events
-├── package.json                   # NPM configuration and scripts
-├── tsconfig.json                  # TypeScript compiler settings
-└── README.md                      # Documentation & instructions
+  dist/                  Compiled extension ready to load into Chrome
+  public/                Manifest and icon assets
+  scripts/build.mjs      Vite build script producing self-contained bundles
+  src/
+    common/              Filters and sensitive data redactor
+    content/             Studio detector, navigation listener, and dev UI
+    interceptor/         Passive fetch and XHR observer
+    types/               Shared TypeScript interfaces
+  package.json           Dependencies and build scripts
+  tsconfig.json          Strict TypeScript configuration
 ```
 
----
+## Getting started
 
-## 🛠️ Build Instructions
+You will need Node.js (version 18 or newer) and npm installed on your computer.
 
-### Prerequisites
-- Node.js >= 18 (tested on Node v22.x)
-- npm >= 9
+1. Clone this repository to your machine.
 
-### 1. Install Dependencies
-```bash
-npm install
-```
+2. Install dependencies:
+   npm install
 
-### 2. Build Extension
-```bash
-npm run build
-```
-This runs strict TypeScript type checking (`tsc --noEmit`) and compiles both `content.js` and `interceptor.js` into the `dist/` directory as self-contained IIFEs with source maps.
+3. Build the extension:
+   npm run build
 
-### 3. Watch Mode (Live development)
-```bash
-npm run watch
-```
+If you want the bundler to automatically rebuild whenever you make changes to the source files, run:
+   npm run watch
 
----
+## Loading the extension into your browser
 
-## 🧩 Loading & Reloading in Chrome / Chromium
+1. Open Google Chrome, Brave, Edge, or any Chromium-based browser.
+2. Type chrome://extensions in your address bar and press Enter.
+3. Turn on Developer mode using the toggle switch in the top right corner.
+4. Click the Load unpacked button in the top left corner.
+5. Choose the dist directory inside this project folder.
+6. The extension is now active and ready.
 
-1. Open Google Chrome or any Chromium-based browser (Brave, Edge).
-2. Navigate to `chrome://extensions`.
-3. In the top-right corner, toggle **Developer mode** to **ON**.
-4. In the top-left corner, click **Load unpacked**.
-5. Select the `dist/` folder:
-   ```
-   /home/assem/Desktop/Projects/youtube_rvm/dist
-   ```
-6. **To reload after code changes:**
-   Click the circular reload button on the **ShortLinker POC - YouTube Studio Related Video** card in `chrome://extensions`, then refresh the YouTube Studio tab.
+## How to capture the Related Video save request
 
----
+We need help capturing one real save request so we can map out the payload schema. Here is how you can do it in two minutes:
 
-## 🔬 How the Network Inspector Works
+1. Open studio.youtube.com in your browser while signed in.
+2. In the bottom right corner of the page, you will see a small dark card titled ShortLinker POC.
+3. Click the Network Inspector tab on the card.
+4. Navigate inside YouTube Studio to Content, switch to the Shorts tab, and click any Short to open its details editor.
+5. Back on the ShortLinker card, click the blue Start Capture button. The status indicator will turn green.
+6. In the YouTube editor, scroll down to the Related video field, pick any video, and click the blue SAVE button in the upper right corner of YouTube Studio.
+7. Look at the ShortLinker card. You will see a new entry appear showing the captured endpoint and status.
+8. Click the Copy JSON button on that card.
+9. Click Stop Capture, and paste the copied snippet into our project discussion or issue tracker.
 
-### 1. Dual-World Architecture
-- **MAIN World (`interceptor.js`):** Runs at `document_start` directly in the page's execution context. It passively wraps `window.fetch` and `XMLHttpRequest.prototype` to inspect outgoing request bodies. Calls to the original functions proceed unmodified and uninhibited.
-- **Isolated World (`content.js`):** Runs the development UI in an isolated Shadow DOM container.
-- **Communication Bridge:** When candidate requests are detected, the MAIN-world script redacts sensitive data and dispatches a sanitized DOM `CustomEvent` (`shortlinker-network-capture`) to the isolated world. A control event (`shortlinker-control-command`) allows the UI to toggle capture ON/OFF.
-- **Duplicate Protection:** Uses `window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED` to prevent multiple interceptors during SPA transitions.
+## Built-in safety precautions
 
-### 2. Security & Redaction Safeguards
-- **Conservative Filtering:** Telemetry endpoints (`log_event`, `stats/playback`, `heartbeat`, etc.) and non-mutating requests are ignored. Only mutation candidates containing keywords (`youtubei`, `metadata`, `video`, `edit`, `save`, `mutation`) are captured.
-- **Headers Redacted:** `Cookie`, `Authorization`, and `SAPISID` headers are strictly stripped. Only safe metadata (`content-type`, `x-youtube-client-name`, etc.) is retained.
-- **Recursive Body Redaction:** Any fields matching `token`, `auth`, `authorization`, `cookie`, `cookies`, `sapisid`, `access_token`, `refresh_token`, `password`, `session`, or `credential` have their values replaced with `[REDACTED]` before passing to the UI or console.
-- **In-Memory Only:** No data is written to `chrome.storage`, `localStorage`, or disk.
+The network inspector was engineered with strict guardrails:
 
----
+• Strictly passive: It wraps the browser's native network calls without touching or modifying any outgoing requests, headers, or responses.
 
-## 📋 Manual Procedure for Capturing the Related Video Request
+• Deep automatic redaction: Before any request body is displayed or copied, all sensitive keys such as tokens, auth hashes, cookies, and session strings are recursively replaced with redacted placeholders.
 
-Follow this exact procedure to capture the real mutation signature:
+• Safe headers only: Sensitive headers like Cookie and Authorization are stripped immediately. Only non-sensitive metadata such as Content-Type is displayed.
 
-1. Open **[https://studio.youtube.com/](https://studio.youtube.com/)** in Chrome (ensure you are logged in).
-2. Look at the bottom-right corner for the **ShortLinker POC** card.
-3. Click the **Network Inspector** tab on the card.
-4. Navigate in YouTube Studio:
-   - Click **Content** in the left sidebar.
-   - Switch to the **Shorts** tab.
-   - Click on any Short to open its **Video details** editor (`https://studio.youtube.com/video/<VIDEO_ID>/edit`).
-5. On the ShortLinker card under the **Network Inspector** tab:
-   - Click **Start Capture** (the status pill will turn green: `Status: ON`).
-6. In YouTube Studio's editor:
-   - Scroll down to the **"Related video"** section.
-   - Click to select or change a Related Video (choose any public video on your channel).
-   - Click the blue **SAVE** button in the top-right corner of YouTube Studio.
-7. Observe the ShortLinker Network Inspector card:
-   - The captured candidate request will appear in the card list (e.g., `POST /youtubei/v1/video_manager/metadata_update` or similar).
-   - The card displays the timestamp, HTTP method, response status, content type, and sanitized body.
-8. Click the **"Copy JSON"** button on that captured request card.
-9. Click **Stop Capture** on the ShortLinker card.
+• In-memory only: Captured requests live in browser memory during your session. Nothing is ever written to disk, local storage, or external logs.
 
----
+## Contributing
 
-## 📤 What to Send Back for Analysis
-
-Paste the copied JSON from the **Copy JSON** button into the chat. It will look like this:
-
-```json
-{
-  "method": "POST",
-  "url": "https://studio.youtube.com/youtubei/v1/video_manager/...",
-  "pathname": "/youtubei/v1/video_manager/...",
-  "contentType": "application/json",
-  "status": 200,
-  "safeHeaders": {
-    "content-type": "application/json",
-    "x-youtube-client-name": "...",
-    "x-youtube-client-version": "..."
-  },
-  "sanitizedBody": {
-    "context": { ... },
-    ...
-  }
-}
-```
-
-This will reveal the exact mutation key and payload structure YouTube Studio requires to set a Short's Related Video!
+Whether you are a creator testing this on your channel or an engineer looking to help with bulk queuing and UI design, your feedback is warmly welcomed. Feel free to open an issue or start a discussion.
