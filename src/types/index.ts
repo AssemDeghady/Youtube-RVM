@@ -69,7 +69,15 @@ export interface ReplayResult {
   attestationRejected?: boolean;
 }
 
-export type MutationItemStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+import type { ClassifiedError } from '../common/error-classifier';
+
+export type MutationItemStatus =
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
+  | 'not_attempted';
 
 export interface MutationItemProgress {
   sourceShortId: string;
@@ -79,6 +87,7 @@ export interface MutationItemProgress {
   statusText?: string;
   durationMs?: number;
   error?: string;
+  classifiedError?: ClassifiedError;
   attestationRejected?: boolean;
 }
 
@@ -88,8 +97,25 @@ export interface MutationJobSummary {
   completed: number;
   succeeded: number;
   failed: number;
+  notAttempted: number;
   isCancelled: boolean;
+  failedItemIds: string[];
   items: MutationItemProgress[];
+}
+
+export interface ImmutableJobSnapshot {
+  jobId: string;
+  targetVideoId: string;
+  targetVideoTitle?: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  notAttempted: number;
+  isCancelled: boolean;
+  items: readonly MutationItemProgress[];
+  failedItemIds: readonly string[];
+  finishedAt: string;
 }
 
 export interface MutationExecutePayload {
@@ -122,5 +148,6 @@ export const BRIDGE_EVENTS = {
   TEMPLATE_STATUS_RESPONSE: 'shortlinker-template-status-response',
   CATALOG_REQUEST: 'shortlinker-catalog-request',
   CATALOG_RESPONSE: 'shortlinker-catalog-response',
-  REFRESH_CATALOG: 'shortlinker-refresh-catalog'
+  REFRESH_CATALOG: 'shortlinker-refresh-catalog',
+  RETRY_FAILED: 'shortlinker-retry-failed'
 } as const;

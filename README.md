@@ -22,18 +22,22 @@ Everything in this project is built around privacy, simplicity, and keeping comp
 
 • Free and open source forever: No subscriptions, no locked tiers, and no hidden telemetry.
 
-## Current status: Searchable Video Picker & List View MVP
+## Current status: Production Grade Shorts Bulk Assigner
 
 The extension operates directly from the YouTube Studio Shorts List View:
 studio.youtube.com/channel/.../videos/short
 
 Creators can:
 1. Select one or more Shorts using YouTube Studio's own table checkboxes.
-2. Click Select a video to open a searchable picker containing their channel's videos.
+2. Click Select Related Video to open a searchable picker containing their channel's videos.
 3. Search instantly by title or video ID.
 4. Pick any target video, which displays with its title and thumbnail.
-5. Assign the chosen Related Video sequentially to all selected Shorts without opening individual video details pages.
-6. Use manual URL or ID entry as an optional fallback.
+5. Review the clear confirmation modal before starting any bulk action.
+6. Watch live progress with an animated progress bar and per-video status indicators.
+7. Stop the queue at any moment with clean accounting that never marks unreached items as failed.
+8. If any updates fail, view creator-friendly error reasons and retry only the failed items with one click.
+9. Copy failed video IDs to clipboard for easy tracking.
+10. Access advanced diagnostics and network inspection tucked neatly behind a collapsible toggle.
 
 ## Project overview
 
@@ -79,21 +83,23 @@ If you want the bundler to automatically rebuild whenever you make changes to th
 5. Choose the dist directory inside this project folder.
 6. The extension is now active and ready.
 
-## How to use the Searchable Video Assigner
+## How to use the Bulk Video Assigner
 
 1. Open studio.youtube.com in your browser while signed in.
 2. Navigate to Content in the left menu, then switch to the Shorts tab.
 3. In the bottom right corner, open the ShortLinker card.
 4. Select one or more Shorts using YouTube Studio's table checkboxes.
-5. Under Related Video, click Select a video.
+5. Under Related Video, click Select Related Video.
 6. A searchable picker opens showing your channel's videos:
    • Type in the search box to filter instantly by title or video ID
    • Click any video to select it as the target Related Video
    • The picker closes, and your selected video's title and thumbnail are shown
-7. Optional Fallback: If you ever need to link a video not listed, click "Can't find your video? Enter URL or ID" to paste a link directly.
-8. Safety First: If you select 1 Short, click Test Update on this Short to verify that your active session accepts the update.
-9. Once verified, select any number of Shorts and click Assign to Shorts.
-10. The extension executes each update sequentially with a gentle delay, showing live per-video progress and a Stop button to pause at any time.
+7. Optional Fallback: If you ever need to link a video not listed, click "Or enter YouTube URL / ID manually" to paste a link directly.
+8. Click Assign to Selected Shorts to open the Confirmation dialog.
+9. Review the confirmation details and click Start Assignment.
+10. The extension executes each update sequentially with a gentle delay, displaying a live progress bar and per-video status.
+11. You can click Stop at any time to pause the queue.
+12. When finished, if any Shorts encountered issues, click Retry Failed to run only the failed items, or click Copy Failed IDs to copy them.
 
 ## Built-in safety precautions
 

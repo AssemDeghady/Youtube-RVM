@@ -5,6 +5,28 @@
 
 const YOUTUBE_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
 
+const BLACKLISTED_DOM_STRINGS = new Set([
+  'table-heade',
+  'table-header',
+  'video-title',
+  'checkbox-lit',
+  'header-cell',
+  'section-head',
+  'entity-row-c'
+]);
+
+/**
+ * Validates that a string is a genuine 11-char YouTube video ID
+ * and not an accidental slice of a DOM element ID.
+ */
+export function isValidYouTubeVideoId(id: string | null | undefined): boolean {
+  if (!id || typeof id !== 'string') return false;
+  const trimmed = id.trim();
+  if (!YOUTUBE_ID_REGEX.test(trimmed)) return false;
+  if (BLACKLISTED_DOM_STRINGS.has(trimmed.toLowerCase())) return false;
+  return true;
+}
+
 export interface VideoIdParseResult {
   isValid: boolean;
   videoId?: string;

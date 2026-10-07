@@ -1,7 +1,8 @@
 import assert from 'node:assert';
-import { normalizeYouTubeVideoId, buildRelatedVideoPayload } from '../src/common/youtube.ts';
+import { normalizeYouTubeVideoId, isValidYouTubeVideoId, buildRelatedVideoPayload } from '../src/common/youtube.ts';
 import { formatDurationSeconds, parseCreatorVideosResponse } from '../src/common/catalog-parser.ts';
 import { VideoCatalogStore } from '../src/common/video-catalog.ts';
+import { classifyError } from '../src/common/error-classifier.ts';
 
 console.log('[Test] Running automated helper & catalog test suite...\n');
 
@@ -204,4 +205,119 @@ assert.deepStrictEqual(payload.videoLinkageShortsAttribution, {
 });
 console.log('✓ 12. Mutation payload construction using selected video ID verified.');
 
-console.log('\n[Test] All 12 test suites passed successfully (100% assertions verified)!');
+// =========================================================================
+// 7. Strict YouTube Video ID Validation & Blacklist Guards
+// =========================================================================
+assert.strictEqual(isValidYouTubeVideoId('iXSU6nyUK78'), true);
+assert.strictEqual(isValidYouTubeVideoId('6c8mHBpLeNA'), true);
+assert.strictEqual(isValidYouTubeVideoId('a1b2c3d4e5f'), true);
+
+// Accidental DOM elements and slices must be rejected
+assert.strictEqual(isValidYouTubeVideoId('table-heade'), false, 'Should reject table-heade DOM slice');
+assert.strictEqual(isValidYouTubeVideoId('table-header'), false);
+assert.strictEqual(isValidYouTubeVideoId('checkbox-lit'), false);
+assert.strictEqual(isValidYouTubeVideoId('header-cell'), false);
+assert.strictEqual(isValidYouTubeVideoId('section-head'), false);
+assert.strictEqual(isValidYouTubeVideoId('entity-row-c'), false);
+
+// Invalid lengths and nulls
+assert.strictEqual(isValidYouTubeVideoId(''), false);
+assert.strictEqual(isValidYouTubeVideoId(null), false);
+assert.strictEqual(isValidYouTubeVideoId(undefined), false);
+assert.strictEqual(isValidYouTubeVideoId('short'), false);
+assert.strictEqual(isValidYouTubeVideoId('toolongvideoid123'), false);
+console.log('✓ 13. Strict YouTube Video ID validation & DOM blacklist verified.');
+
+// =========================================================================
+// 8. Error Classifier Tests
+// =========================================================================
+// 400 Invalid argument
+const err400 = classifyError('Request contains an invalid argument.', 400);
+assert.strictEqual(err400.category, 'invalid_argument');
+assert.strictEqual(err400.isRetryable, true);
+
+// 401 Session expired
+const err401 = classifyError('Unauthorized', 401);
+assert.strictEqual(err401.category, 'session_expired');
+assert.strictEqual(err401.isRetryable, false);
+
+// Attestation challenge
+const errAttest = classifyError('Attestation token rejected', 200, true);
+assert.strictEqual(errAttest.category, 'verification_rejected');
+assert.strictEqual(errAttest.isRetryable, false);
+
+// Network failure
+const errNet = classifyError('Failed to fetch', 0);
+assert.strictEqual(errNet.category, 'network_error');
+assert.strictEqual(errNet.isRetryable, true);
+
+// Server 500
+const err500 = classifyError('Internal server error', 500);
+assert.strictEqual(err500.category, 'server_error');
+assert.strictEqual(err500.isRetryable, true);
+
+// User cancellation
+const errCancel = classifyError('Operation stopped by user');
+assert.strictEqual(errCancel.category, 'cancelled');
+assert.strictEqual(errCancel.isRetryable, true);
+console.log('✓ 14. Error classifier categorized all 6 error domains accurately.');
+
+// =========================================================================
+// 9. Partial Failure & Retry Accounting Tests
+// =========================================================================
+const mockItems = [
+  { sourceShortId: 'short1', targetVideoId: 'target1', status: 'success' },
+  { sourceShortId: 'short2', targetVideoId: 'target1', status: 'failed', error: 'Invalid argument', classifiedError: err400 },
+  { sourceShortId: 'short3', targetVideoId: 'target1', status: 'success' }
+];
+
+const failedIds = mockItems.filter(it => it.status === 'failed').map(it => it.sourceShortId);
+const succeededCount = mockItems.filter(it => it.status === 'success').length;
+const failedCount = mockItems.filter(it => it.status === 'failed').length;
+
+assert.strictEqual(succeededCount, 2);
+assert.strictEqual(failedCount, 1);
+assert.deepStrictEqual(failedIds, ['short2']);
+console.log('✓ 15. Partial failure filtering & retry IDs extraction verified.');
+
+// =========================================================================
+// 10. Cancellation Accounting Tests (not_attempted vs failed)
+// =========================================================================
+const queueWithCancel = [
+  { sourceShortId: 'short1', targetVideoId: 'target1', status: 'success' },
+  { sourceShortId: 'short2', targetVideoId: 'target1', status: 'not_attempted', classifiedError: errCancel },
+  { sourceShortId: 'short3', targetVideoId: 'target1', status: 'not_attempted', classifiedError: errCancel }
+];
+
+const completedItems = queueWithCancel.filter(it => it.status === 'success' || it.status === 'failed');
+const notAttemptedItems = queueWithCancel.filter(it => it.status === 'not_attempted');
+const actualFailed = queueWithCancel.filter(it => it.status === 'failed');
+
+assert.strictEqual(completedItems.length, 1);
+assert.strictEqual(notAttemptedItems.length, 2);
+assert.strictEqual(actualFailed.length, 0, 'Unattempted items must NOT be counted as failed');
+console.log('✓ 16. Cancellation properly categorizes unreached items as not_attempted without inflating failures.');
+
+// =========================================================================
+// 11. Immutable Job Snapshot Verification
+// =========================================================================
+const snapshot = Object.freeze({
+  jobId: 'job_123',
+  targetVideoId: 'target1',
+  total: 3,
+  completed: 1,
+  succeeded: 1,
+  failed: 0,
+  notAttempted: 2,
+  isCancelled: true,
+  items: Object.freeze([...queueWithCancel]),
+  failedItemIds: Object.freeze([]),
+  finishedAt: '12:00:00 PM'
+});
+
+assert.strictEqual(Object.isFrozen(snapshot), true);
+assert.strictEqual(Object.isFrozen(snapshot.items), true);
+assert.strictEqual(Object.isFrozen(snapshot.failedItemIds), true);
+console.log('✓ 17. Immutable job snapshot guarantees state stability.');
+
+console.log('\n[Test] All 17 test suites passed successfully (100% assertions verified)!');

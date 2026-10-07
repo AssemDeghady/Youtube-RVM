@@ -2,6 +2,7 @@ import { filterSafeHeaders, parseAndSanitizeBody, redactSensitiveData } from '..
 import { isCandidateRequest, isRelatedVideoMutation } from '../common/filter';
 import { buildRelatedVideoPayload } from '../common/youtube';
 import { parseCreatorVideosResponse } from '../common/catalog-parser';
+import { classifyError } from '../common/error-classifier';
 import {
   BRIDGE_EVENTS,
   CapturedRequest,
@@ -18,6 +19,39 @@ declare global {
     SHORTLINKER_NETWORK_INSPECTOR_INSTALLED?: boolean;
     SHORTLINKER_INSPECTOR_ACTIVE?: boolean;
   }
+}
+
+/**
+ * Retains only safe, essential YouTube Studio headers.
+ * Strips authorization tokens, credentials, and cookies completely.
+ */
+function sanitizeMutationHeaders(headers: any): Record<string, string> {
+  const result: Record<string, string> = {
+    'content-type': 'application/json'
+  };
+  if (!headers) return result;
+
+  const setHeader = (k: string, v: string) => {
+    const lower = k.toLowerCase().trim();
+    if (
+      lower === 'content-type' ||
+      lower.startsWith('x-youtube-') ||
+      lower.startsWith('x-goog-') ||
+      lower === 'x-origin'
+    ) {
+      result[lower] = String(v);
+    }
+  };
+
+  if (typeof headers.forEach === 'function') {
+    headers.forEach((value: string, key: string) => setHeader(key, value));
+  } else if (Array.isArray(headers)) {
+    for (const [k, v] of headers) setHeader(k, v);
+  } else if (typeof headers === 'object') {
+    for (const [k, v] of Object.entries(headers)) setHeader(k, v as string);
+  }
+
+  return result;
 }
 
 // 1. Guard against duplicate injection across SPA navigation or scripts
@@ -252,7 +286,7 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
         }
         lastListVideosRequestTemplate = {
           url: urlStr,
-          headers: reqHeaders,
+          headers: sanitizeMutationHeaders(reqHeaders),
           basePayload: parsedBody
         };
 
@@ -287,7 +321,7 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
       lastRawMutation = {
         url: urlStr,
         method: method.toUpperCase(),
-        headers: reqHeaders,
+        headers: sanitizeMutationHeaders(reqHeaders),
         rawBody: parsedBodyForStorage,
         sourceVideoId: mutationCheck.sourceVideoId,
         targetVideoId: mutationCheck.targetVideoId,
@@ -436,7 +470,7 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
               lastRawMutation = {
                 url: meta.url,
                 method: meta.method.toUpperCase(),
-                headers: meta.headers,
+                headers: sanitizeMutationHeaders(meta.headers),
                 rawBody: parsedBodyForStorage,
                 sourceVideoId: mutationCheck.sourceVideoId,
                 targetVideoId: mutationCheck.targetVideoId,
@@ -606,19 +640,23 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     activeJobCancellationFlag = false;
 
     if (!lastRawMutation) {
+      const templateError = classifyError('Mutation template required. Please save a Related Video manually in Studio first.');
       const failedSummary: MutationJobSummary = {
         jobId,
         total: sourceShortIds.length,
         completed: sourceShortIds.length,
         succeeded: 0,
         failed: sourceShortIds.length,
+        notAttempted: 0,
         isCancelled: false,
+        failedItemIds: [...sourceShortIds],
         items: sourceShortIds.map((id) => ({
           sourceShortId: id,
           targetVideoId,
           status: 'failed',
           httpStatus: 0,
-          error: 'Mutation template required. Please save a Related Video manually in Studio first.'
+          error: templateError.userMessage,
+          classifiedError: templateError
         }))
       };
       document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_COMPLETE, { detail: failedSummary }));
@@ -631,19 +669,24 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     );
 
     const items: MutationItemProgress[] = [];
+    const failedItemIds: string[] = [];
     let succeededCount = 0;
     let failedCount = 0;
+    let notAttemptedCount = 0;
 
     for (let i = 0; i < sourceShortIds.length; i++) {
       const sourceShortId = sourceShortIds[i];
 
       // Check if user cancelled
       if (activeJobCancellationFlag) {
+        notAttemptedCount++;
+        const cancelledError = classifyError('Operation stopped by user');
         const cancelledItem: MutationItemProgress = {
           sourceShortId,
           targetVideoId,
-          status: 'cancelled',
-          error: 'Operation cancelled by user'
+          status: 'not_attempted',
+          error: 'Operation stopped by user',
+          classifiedError: cancelledError
         };
         items.push(cancelledItem);
         document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: cancelledItem }));
@@ -697,32 +740,45 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
           }
         }
 
-        const itemResult: MutationItemProgress = {
-          sourceShortId,
-          targetVideoId,
-          status: isSuccess ? 'success' : 'failed',
-          httpStatus: response.status,
-          statusText: response.statusText,
-          durationMs,
-          error: errorMsg || undefined,
-          attestationRejected
-        };
-
         if (isSuccess) {
           succeededCount++;
+          const itemResult: MutationItemProgress = {
+            sourceShortId,
+            targetVideoId,
+            status: 'success',
+            httpStatus: response.status,
+            statusText: response.statusText,
+            durationMs
+          };
+          items.push(itemResult);
+          document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
         } else {
           failedCount++;
+          failedItemIds.push(sourceShortId);
+          const classified = classifyError(errorMsg, response.status, attestationRejected);
+          const itemResult: MutationItemProgress = {
+            sourceShortId,
+            targetVideoId,
+            status: 'failed',
+            httpStatus: response.status,
+            statusText: response.statusText,
+            durationMs,
+            error: classified.userMessage,
+            classifiedError: classified,
+            attestationRejected
+          };
+          items.push(itemResult);
+          document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
         }
-
-        items.push(itemResult);
-        document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
 
         if (i < sourceShortIds.length - 1 && !activeJobCancellationFlag && delayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       } catch (err: any) {
         failedCount++;
+        failedItemIds.push(sourceShortId);
         const durationMs = Math.round(performance.now() - startTime);
+        const classified = classifyError(err?.message || 'Network exception during fetch', 0);
         const itemResult: MutationItemProgress = {
           sourceShortId,
           targetVideoId,
@@ -730,7 +786,8 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
           httpStatus: 0,
           statusText: 'Network Exception',
           durationMs,
-          error: err?.message || 'Network exception during fetch'
+          error: classified.userMessage,
+          classifiedError: classified
         };
         items.push(itemResult);
         document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
@@ -740,15 +797,17 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     const summary: MutationJobSummary = {
       jobId,
       total: sourceShortIds.length,
-      completed: items.length,
+      completed: succeededCount + failedCount,
       succeeded: succeededCount,
       failed: failedCount,
+      notAttempted: notAttemptedCount,
       isCancelled: activeJobCancellationFlag,
+      failedItemIds,
       items
     };
 
     console.info(
-      `%c[ShortLinker Queue] Completed job ${jobId}: ${succeededCount} succeeded, ${failedCount} failed`,
+      `%c[ShortLinker Queue] Completed job ${jobId}: ${succeededCount} succeeded, ${failedCount} failed, ${notAttemptedCount} not attempted`,
       `font-weight: bold; color: ${failedCount === 0 ? '#22c55e' : '#f59e0b'};`
     );
 

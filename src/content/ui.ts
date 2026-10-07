@@ -6,10 +6,12 @@ import {
   MutationItemProgress,
   MutationJobSummary,
   MutationExecutePayload,
+  ImmutableJobSnapshot,
   TargetVideo,
   BRIDGE_EVENTS
 } from '../types';
 import { normalizeYouTubeVideoId } from '../common/youtube';
+import { classifyError } from '../common/error-classifier';
 import { VideoCatalogStore } from '../common/video-catalog';
 import { isShortsListView } from './detector';
 
@@ -19,6 +21,11 @@ export class DevIndicatorUI {
   private currentContext: StudioPageContext | null = null;
   private navCount = 0;
   private isMinimized = false;
+
+  // Onboarding & Advanced Mode
+  private isOnboardingDismissed = false;
+  private showAdvanced = false;
+  private isConfirmingBulk = false;
 
   // Video Catalog & Target Selection
   private catalogStore: VideoCatalogStore = new VideoCatalogStore();
@@ -51,10 +58,8 @@ export class DevIndicatorUI {
   private bulkJobState: 'idle' | 'running' | 'cancelled' | 'done' = 'idle';
   private bulkItemsProgress: Map<string, MutationItemProgress> = new Map();
   private bulkSummary: MutationJobSummary | null = null;
+  private lastJobSnapshot: ImmutableJobSnapshot | null = null;
   private currentJobId: string | null = null;
-
-  // Active tab: 'shorts' (default on Shorts list), 'inspector', 'studio'
-  private activeTab: 'shorts' | 'inspector' | 'studio' = 'shorts';
 
   public mount(initialContext: StudioPageContext): void {
     if (this.hostElement) return;
@@ -65,12 +70,6 @@ export class DevIndicatorUI {
     this.shadowRoot = this.hostElement.attachShadow({ mode: 'open' });
 
     document.body.appendChild(this.hostElement);
-
-    if (isShortsListView()) {
-      this.activeTab = 'shorts';
-    } else {
-      this.activeTab = 'inspector';
-    }
 
     // Check template status in MAIN world
     document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.TEMPLATE_STATUS_REQUEST));
@@ -149,6 +148,23 @@ export class DevIndicatorUI {
         if (event.detail.succeeded > 0) {
           this.hasSingleTestSucceeded = true;
         }
+
+        // Create immutable job snapshot
+        this.lastJobSnapshot = Object.freeze({
+          jobId: event.detail.jobId,
+          targetVideoId: this.normalizedTargetId || '',
+          targetVideoTitle: this.selectedTargetVideo?.title,
+          total: event.detail.total,
+          completed: event.detail.completed,
+          succeeded: event.detail.succeeded,
+          failed: event.detail.failed,
+          notAttempted: event.detail.notAttempted ?? 0,
+          isCancelled: event.detail.isCancelled,
+          items: Object.freeze([...event.detail.items]),
+          failedItemIds: Object.freeze([...(event.detail.failedItemIds || [])]),
+          finishedAt: new Date().toLocaleTimeString()
+        });
+
         this.render();
       }
     }) as EventListener);
@@ -159,10 +175,6 @@ export class DevIndicatorUI {
   public updateContext(context: StudioPageContext): void {
     this.currentContext = context;
     this.navCount++;
-    if (isShortsListView() && this.activeTab === 'studio') {
-      this.activeTab = 'shorts';
-    }
-    // Refresh DOM video catalog on route change
     this.catalogStore.extractFromDom();
     this.render();
   }
@@ -218,7 +230,7 @@ export class DevIndicatorUI {
       this.manualInputError = null;
       this.selectedTargetVideo = {
         id: res.videoId,
-        title: `Manual Video (${res.videoId})`,
+        title: `Video (${res.videoId})`,
         thumbnailUrl: `https://i.ytimg.com/vi/${res.videoId}/mqdefault.jpg`
       };
     } else {
@@ -251,15 +263,17 @@ export class DevIndicatorUI {
     document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.EXECUTE_MUTATION, { detail: payload }));
   }
 
-  private executeBulkAssignment(): void {
-    if (!this.normalizedTargetId || this.selectedShortIds.length === 0) return;
+  private executeBulkAssignment(idsToRun?: string[]): void {
+    const ids = idsToRun || this.selectedShortIds;
+    if (!this.normalizedTargetId || ids.length === 0) return;
 
+    this.isConfirmingBulk = false;
     this.bulkJobState = 'running';
     this.bulkSummary = null;
     this.bulkItemsProgress.clear();
     this.currentJobId = `bulk_${Date.now()}`;
 
-    for (const id of this.selectedShortIds) {
+    for (const id of ids) {
       this.bulkItemsProgress.set(id, {
         sourceShortId: id,
         targetVideoId: this.normalizedTargetId,
@@ -270,12 +284,24 @@ export class DevIndicatorUI {
 
     const payload: MutationExecutePayload = {
       jobId: this.currentJobId,
-      sourceShortIds: this.selectedShortIds,
+      sourceShortIds: ids,
       targetVideoId: this.normalizedTargetId,
       delayMs: 800
     };
 
     document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.EXECUTE_MUTATION, { detail: payload }));
+  }
+
+  private retryFailedItems(): void {
+    if (!this.lastJobSnapshot || this.lastJobSnapshot.failedItemIds.length === 0) return;
+    const failedIds = [...this.lastJobSnapshot.failedItemIds];
+    this.executeBulkAssignment(failedIds);
+  }
+
+  private copyFailedIds(buttonEl: HTMLButtonElement): void {
+    if (!this.lastJobSnapshot || this.lastJobSnapshot.failedItemIds.length === 0) return;
+    const text = this.lastJobSnapshot.failedItemIds.join('\n');
+    this.copyToClipboard(text, buttonEl);
   }
 
   private cancelBulkJob(): void {
@@ -319,8 +345,8 @@ export class DevIndicatorUI {
     const css = `
       :host {
         position: fixed;
-        bottom: 18px;
-        right: 18px;
+        bottom: 20px;
+        right: 20px;
         z-index: 2147483647;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         font-size: 12px;
@@ -331,20 +357,20 @@ export class DevIndicatorUI {
         background: #18181b;
         color: #f4f4f5;
         border: 1px solid #3f3f46;
-        border-radius: 10px;
-        box-shadow: 0 14px 30px -4px rgba(0, 0, 0, 0.7), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
-        padding: 12px 14px;
-        width: 420px;
+        border-radius: 12px;
+        box-shadow: 0 16px 36px -4px rgba(0, 0, 0, 0.75), 0 8px 12px -6px rgba(0, 0, 0, 0.5);
+        padding: 14px 16px;
+        width: 430px;
         max-width: 92vw;
         max-height: 88vh;
         display: flex;
         flex-direction: column;
-        backdrop-filter: blur(8px);
+        backdrop-filter: blur(10px);
         transition: all 0.2s ease-in-out;
       }
       .panel-container.minimized {
         width: auto;
-        padding: 6px 12px;
+        padding: 8px 14px;
         border-radius: 20px;
         cursor: pointer;
         display: block;
@@ -354,7 +380,7 @@ export class DevIndicatorUI {
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
       }
       .title-group {
         display: flex;
@@ -380,49 +406,25 @@ export class DevIndicatorUI {
         color: #a1a1aa;
         cursor: pointer;
         padding: 2px 6px;
-        font-size: 11px;
+        font-size: 12px;
         border-radius: 4px;
       }
       .minimize-btn:hover {
         background: #27272a;
         color: #fafafa;
       }
-      .tab-bar {
-        display: flex;
-        border-bottom: 1px solid #27272a;
-        margin-bottom: 10px;
-      }
-      .tab-btn {
-        flex: 1;
-        padding: 6px 0;
-        background: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
-        color: #a1a1aa;
-        font-size: 11px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.15s ease;
-      }
-      .tab-btn.active {
-        color: #38bdf8;
-        border-bottom-color: #38bdf8;
-      }
-      .tab-btn:hover:not(.active) {
-        color: #e4e4e7;
-      }
-      .tab-content {
+      .scroll-body {
         overflow-y: auto;
-        max-height: 560px;
+        max-height: 580px;
         display: flex;
         flex-direction: column;
         gap: 10px;
-        padding-right: 4px;
+        padding-right: 2px;
       }
-      .tab-content::-webkit-scrollbar {
+      .scroll-body::-webkit-scrollbar {
         width: 4px;
       }
-      .tab-content::-webkit-scrollbar-thumb {
+      .scroll-body::-webkit-scrollbar-thumb {
         background: #3f3f46;
         border-radius: 4px;
       }
@@ -431,8 +433,8 @@ export class DevIndicatorUI {
       .card-box {
         background: #202023;
         border: 1px solid #3f3f46;
-        border-radius: 6px;
-        padding: 10px;
+        border-radius: 8px;
+        padding: 10px 12px;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -441,7 +443,32 @@ export class DevIndicatorUI {
         border-color: #0284c7;
       }
 
-      /* Video Picker Display */
+      /* Onboarding banner */
+      .onboarding-banner {
+        background: linear-gradient(135deg, rgba(2, 132, 199, 0.15), rgba(99, 102, 241, 0.15));
+        border: 1px solid #0284c7;
+        border-radius: 8px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        position: relative;
+      }
+      .onboarding-title {
+        font-weight: 600;
+        font-size: 11px;
+        color: #38bdf8;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .onboarding-steps {
+        font-size: 11px;
+        color: #d1d5db;
+        line-height: 1.4;
+      }
+
+      /* Target Video Card */
       .selected-video-card {
         display: flex;
         align-items: center;
@@ -452,8 +479,8 @@ export class DevIndicatorUI {
         border-radius: 6px;
       }
       .selected-thumb {
-        width: 64px;
-        height: 36px;
+        width: 68px;
+        height: 38px;
         border-radius: 4px;
         object-fit: cover;
         background: #27272a;
@@ -480,7 +507,7 @@ export class DevIndicatorUI {
         background: none;
         border: none;
         color: #38bdf8;
-        font-size: 10px;
+        font-size: 11px;
         cursor: pointer;
         padding: 0;
         text-decoration: underline;
@@ -489,19 +516,19 @@ export class DevIndicatorUI {
         color: #7dd3fc;
       }
 
-      /* Modal Popover */
+      /* Modal Popovers */
       .modal-overlay {
         position: absolute;
         top: 0;
         left: 0;
         right: 0;
         bottom: 0;
-        background: rgba(15, 23, 42, 0.95);
-        backdrop-filter: blur(6px);
-        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.96);
+        backdrop-filter: blur(8px);
+        border-radius: 12px;
         display: flex;
         flex-direction: column;
-        padding: 12px;
+        padding: 14px;
         z-index: 100;
         box-shadow: inset 0 0 0 1px #3f3f46;
       }
@@ -509,7 +536,7 @@ export class DevIndicatorUI {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
       }
       .modal-title {
         font-weight: 600;
@@ -520,7 +547,7 @@ export class DevIndicatorUI {
         background: transparent;
         border: none;
         color: #a1a1aa;
-        font-size: 16px;
+        font-size: 18px;
         cursor: pointer;
         line-height: 1;
       }
@@ -622,7 +649,7 @@ export class DevIndicatorUI {
       }
       .btn {
         border: none;
-        padding: 6px 12px;
+        padding: 8px 14px;
         border-radius: 6px;
         font-size: 11px;
         font-weight: 600;
@@ -658,34 +685,33 @@ export class DevIndicatorUI {
         border: 1px solid #3f3f46;
       }
       .btn-sm {
-        padding: 3px 8px;
+        padding: 4px 8px;
         font-size: 10px;
       }
 
-      /* Form input */
-      .input-text {
-        background: #09090b;
-        border: 1px solid #3f3f46;
-        color: #f4f4f5;
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 11px;
-        font-family: inherit;
-        outline: none;
+      /* Progress Bar & Items */
+      .progress-bar-container {
+        width: 100%;
+        height: 8px;
+        background: #27272a;
+        border-radius: 4px;
+        overflow: hidden;
+        margin: 6px 0;
       }
-      .input-text:focus {
-        border-color: #0284c7;
+      .progress-bar-fill {
+        height: 100%;
+        background: #0284c7;
+        transition: width 0.3s ease;
+        border-radius: 4px;
       }
-
-      /* Progress table */
       .progress-list {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        max-height: 180px;
+        max-height: 160px;
         overflow-y: auto;
         border: 1px solid #27272a;
-        border-radius: 4px;
+        border-radius: 6px;
         padding: 6px;
         background: #09090b;
       }
@@ -694,14 +720,15 @@ export class DevIndicatorUI {
         justify-content: space-between;
         align-items: center;
         font-size: 11px;
-        padding: 2px 4px;
-        border-radius: 3px;
+        padding: 3px 6px;
+        border-radius: 4px;
       }
       .progress-row.success {
         color: #4ade80;
       }
       .progress-row.failed {
         color: #f87171;
+        background: rgba(239, 68, 68, 0.08);
       }
       .progress-row.running {
         color: #38bdf8;
@@ -710,6 +737,29 @@ export class DevIndicatorUI {
       .progress-row.queued {
         color: #71717a;
       }
+      .progress-row.not_attempted {
+        color: #9ca3af;
+        opacity: 0.7;
+      }
+
+      /* Failed list in summary */
+      .failed-items-box {
+        background: #18181b;
+        border: 1px solid #ef4444;
+        border-radius: 6px;
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      .failed-item-entry {
+        font-size: 10px;
+        color: #fca5a5;
+        line-height: 1.35;
+      }
+
       .mono {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       }
@@ -721,19 +771,20 @@ export class DevIndicatorUI {
         font-family: ui-monospace, monospace;
         font-size: 10px;
         color: #a1a1aa;
-        max-height: 110px;
+        max-height: 100px;
         overflow-y: auto;
         white-space: pre-wrap;
         margin: 0;
       }
       .footer-note {
-        margin-top: 8px;
-        padding-top: 6px;
+        margin-top: 10px;
+        padding-top: 8px;
         border-top: 1px solid #27272a;
         font-size: 10px;
         color: #71717a;
         display: flex;
         justify-content: space-between;
+        align-items: center;
       }
     `;
 
@@ -754,34 +805,59 @@ export class DevIndicatorUI {
     }
 
     // -------------------------------------------------------------
-    // SHORTS LIST VIEW TAB CONTENT
+    // ONBOARDING BANNER (Dismissible)
     // -------------------------------------------------------------
-    let shortsTabContent = '';
+    let onboardingHtml = '';
+    if (!this.isOnboardingDismissed) {
+      onboardingHtml = `
+        <div class="onboarding-banner">
+          <div class="onboarding-title">
+            <span>✨ Fast Setup</span>
+            <button class="modal-close-btn" id="btn-dismiss-onboarding" style="font-size: 14px;">&times;</button>
+          </div>
+          <div class="onboarding-steps">
+            1. Select one or more Shorts in YouTube Studio's table.<br>
+            2. Choose your Related Video.<br>
+            3. Click Assign to update them safely in your session.
+          </div>
+        </div>
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // SHORTS LIST WORKFLOW CONTENT
+    // -------------------------------------------------------------
+    let workflowContent = '';
 
     if (!onShortsList) {
-      shortsTabContent = `
+      workflowContent = `
         <div class="card-box" style="text-align: center; padding: 18px 10px;">
           <div style="font-weight: 600; font-size: 12px; color: #f4f4f5; margin-bottom: 4px;">
             Shorts List View Standby
           </div>
           <div style="font-size: 11px; color: #a1a1aa; line-height: 1.4;">
-            Navigate to <b>Content &rarr; Shorts</b> in YouTube Studio to use bulk selection and link Related Videos directly from the list.
+            Navigate to <b>Content &rarr; Shorts</b> in YouTube Studio to select Shorts and assign Related Videos.
           </div>
         </div>
       `;
     } else {
-      const templateNoticeHtml = !this.hasTemplate
+      // Session status hint
+      const sessionHintHtml = !this.hasTemplate
         ? `
         <div class="card-box" style="border-color: #d97706; background: rgba(217, 119, 6, 0.1);">
           <div style="font-weight: 600; color: #fbbf24; font-size: 11px;">
-            Session Template Required
+            Session Authorization Required
           </div>
-          <div style="font-size: 10px; color: #d1d5db; line-height: 1.35;">
-            To link videos through your session, YouTube requires an active mutation template.
-            Please save any Related Video manually once in Studio this session to capture it.
+          <div style="font-size: 11px; color: #d1d5db; line-height: 1.35;">
+            To link videos through your session, YouTube requires an active session token.
+            Please open any Short in Studio and save a Related Video manually once to activate.
           </div>
         </div>`
-        : '';
+        : `
+        <div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #a1a1aa; padding: 0 2px;">
+          <span>Studio Session: <span style="color: #4ade80; font-weight: 600;">Connected</span></span>
+          <span style="font-size: 10px;">Zero credentials stored</span>
+        </div>`;
 
       // Target Related Video Selection UI
       let targetSelectorHtml = '';
@@ -789,7 +865,7 @@ export class DevIndicatorUI {
         targetSelectorHtml = `
           <div class="card-box">
             <div style="font-size: 11px; font-weight: 600; color: #a1a1aa; display: flex; justify-content: space-between;">
-              <span>Selected Related Video:</span>
+              <span>Target Related Video:</span>
               <button class="text-link" id="btn-clear-target" style="color: #f87171;">Clear</button>
             </div>
             <div class="selected-video-card">
@@ -816,15 +892,12 @@ export class DevIndicatorUI {
             <div style="font-size: 11px; font-weight: 600; color: #a1a1aa;">
               Related Video:
             </div>
-            <button class="btn btn-primary" id="btn-open-picker" style="width: 100%; padding: 8px 12px;">
-              🔍 Select a video
+            <button class="btn btn-primary" id="btn-open-picker" style="width: 100%; padding: 9px 12px;">
+              🔍 Select Related Video
             </button>
-            <div style="font-size: 10px; color: #71717a; text-align: center;">
-              Choose the video that should be linked to the selected Shorts.
-            </div>
             <div style="text-align: center; margin-top: 2px;">
               <button class="text-link" id="btn-toggle-manual">
-                ${this.isManualFallbackOpen ? "Hide manual entry" : "Can't find your video? Enter URL or ID"}
+                ${this.isManualFallbackOpen ? "Hide manual entry" : "Or enter YouTube URL / ID manually"}
               </button>
             </div>
             ${
@@ -835,8 +908,9 @@ export class DevIndicatorUI {
                   type="text"
                   id="manual-url-input"
                   class="input-text"
-                  placeholder="Paste YouTube watch URL, Shorts URL, or ID"
+                  placeholder="Paste YouTube watch URL or ID"
                   value="${escapeHtml(this.manualInputVal)}"
+                  style="background: #09090b; border: 1px solid #3f3f46; color: #ffffff; padding: 6px 8px; border-radius: 6px;"
                 />
                 ${
                   this.manualInputError
@@ -862,64 +936,153 @@ export class DevIndicatorUI {
           <div style="font-size: 10px; color: #a1a1aa;">
             ${
               selectedCount === 0
-                ? 'Select Shorts using the row checkboxes in YouTube Studio.'
+                ? 'Check one or more rows in Studio to link this video.'
                 : selectedCount === 1
-                ? `1 Short selected (${this.selectedShortIds[0]}). Ready for test.`
-                : `${selectedCount} Shorts selected from list.`
+                ? `1 Short selected (${this.selectedShortIds[0]}).`
+                : `${selectedCount} Shorts selected in Studio.`
             }
           </div>
         </div>
       `;
 
-      // Execution Section: Single Short vs Multi-Short
+      // Execution States: Idle, Running, Done
       let executionSectionHtml = '';
 
-      if (selectedCount === 0) {
+      if (this.bulkJobState === 'running') {
+        const total = selectedCount;
+        const completedCount = Array.from(this.bulkItemsProgress.values()).filter(
+          (it) => it.status === 'success' || it.status === 'failed' || it.status === 'cancelled' || it.status === 'not_attempted'
+        ).length;
+        const percent = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+
+        const progressRowsHtml = Array.from(this.bulkItemsProgress.values())
+          .map((it) => {
+            const icon =
+              it.status === 'success'
+                ? '✓'
+                : it.status === 'failed'
+                ? '✗'
+                : it.status === 'running'
+                ? '⟳'
+                : it.status === 'not_attempted'
+                ? '⏸'
+                : '○';
+            return `
+              <div class="progress-row ${it.status}">
+                <span>${icon} <span class="mono">${it.sourceShortId}</span></span>
+                <span>${it.status === 'running' ? 'Updating...' : it.status.toUpperCase()}</span>
+              </div>
+            `;
+          })
+          .join('');
+
         executionSectionHtml = `
-          <div style="text-align: center; color: #71717a; font-size: 11px; padding: 10px 0;">
-            Check one or more rows in YouTube's table to enable actions.
+          <div class="card-box highlight">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 600; font-size: 12px; color: #38bdf8;">
+                Updating: ${completedCount} / ${total} (${percent}%)
+              </span>
+              <button class="btn btn-danger btn-sm" id="btn-cancel-bulk">
+                Stop
+              </button>
+            </div>
+            <div class="progress-bar-container">
+              <div class="progress-bar-fill" style="width: ${percent}%;"></div>
+            </div>
+            <div class="progress-list">
+              ${progressRowsHtml}
+            </div>
+          </div>
+        `;
+      } else if (this.bulkJobState === 'done' || this.bulkJobState === 'cancelled') {
+        const snapshot = this.lastJobSnapshot;
+        const isCancelled = snapshot?.isCancelled;
+        const failedCount = snapshot?.failed ?? 0;
+        const succeededCount = snapshot?.succeeded ?? 0;
+        const notAttemptedCount = snapshot?.notAttempted ?? 0;
+        const isFullSuccess = failedCount === 0 && notAttemptedCount === 0;
+
+        let resultSummaryHtml = '';
+
+        if (isFullSuccess) {
+          resultSummaryHtml = `
+            <div class="card-box" style="border-color: #059669; background: rgba(5, 150, 105, 0.1); text-align: center; padding: 14px;">
+              <div style="font-size: 24px; margin-bottom: 4px;">🎉</div>
+              <div style="font-weight: 700; font-size: 13px; color: #4ade80;">
+                All ${succeededCount} Shorts Updated!
+              </div>
+              <div style="font-size: 11px; color: #d1d5db; margin-top: 4px;">
+                Related video successfully assigned to all selected Shorts.
+              </div>
+              <div style="margin-top: 10px;">
+                <button class="btn btn-secondary btn-sm" id="btn-reset-bulk">Done</button>
+              </div>
+            </div>
+          `;
+        } else {
+          // Partial failure or cancelled
+          const failedItems = snapshot?.items.filter((it) => it.status === 'failed') || [];
+          const failedListHtml = failedItems
+            .map(
+              (it) => `
+            <div class="failed-item-entry">
+              <b>${it.sourceShortId}</b>: ${escapeHtml(it.classifiedError?.userMessage || it.error || 'Update failed')}
+            </div>`
+            )
+            .join('');
+
+          resultSummaryHtml = `
+            <div class="card-box" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.08);">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 700; font-size: 12px; color: #f4f4f5;">
+                  ${isCancelled ? 'Operation Stopped' : 'Update Finished with Issues'}
+                </span>
+                <span class="badge-pill badge-amber">
+                  ${succeededCount} OK &bull; ${failedCount} Failed ${notAttemptedCount > 0 ? `&bull; ${notAttemptedCount} Skipped` : ''}
+                </span>
+              </div>
+
+              ${
+                failedItems.length > 0
+                  ? `
+                <div style="font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px;">
+                  Failed Shorts:
+                </div>
+                <div class="failed-items-box">
+                  ${failedListHtml}
+                </div>`
+                  : ''
+              }
+
+              <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px;">
+                ${
+                  failedCount > 0
+                    ? `
+                  <button class="btn btn-secondary btn-sm" id="btn-copy-failed">
+                    📋 Copy Failed IDs
+                  </button>
+                  <button class="btn btn-primary btn-sm" id="btn-retry-failed">
+                    ⟳ Retry Failed (${failedCount})
+                  </button>`
+                    : ''
+                }
+                <button class="btn btn-secondary btn-sm" id="btn-reset-bulk">Close</button>
+              </div>
+            </div>
+          `;
+        }
+
+        executionSectionHtml = resultSummaryHtml;
+      } else if (selectedCount === 0) {
+        executionSectionHtml = `
+          <div style="text-align: center; color: #71717a; font-size: 11px; padding: 8px 0;">
+            Select one or more Shorts using YouTube Studio's checkboxes to proceed.
           </div>
         `;
       } else if (selectedCount === 1) {
-        // EXACT SINGLE SHORT TEST PATH
+        // Single Short
         const singleShortId = this.selectedShortIds[0];
-
-        if (this.singleTestState === 'idle') {
-          executionSectionHtml = `
-            <div class="card-box highlight">
-              <div style="font-weight: 600; font-size: 11px; color: #38bdf8;">
-                Test One Selected Short
-              </div>
-              <div style="font-size: 11px; color: #d1d5db;">
-                Target Short: <span class="mono">${singleShortId}</span>
-              </div>
-              <button
-                class="btn btn-primary"
-                id="btn-single-test-confirm"
-                ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
-              >
-                Test Update on this Short
-              </button>
-            </div>
-          `;
-        } else if (this.singleTestState === 'confirming') {
-          executionSectionHtml = `
-            <div class="card-box" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.08);">
-              <div style="font-weight: 600; font-size: 11px; color: #fbbf24;">
-                Confirm Single Test
-              </div>
-              <div style="font-size: 11px; color: #f3f4f6; line-height: 1.4;">
-                You are about to change:<br>
-                Short: <span class="mono">${singleShortId}</span><br>
-                Related Video: <span class="mono highlight">${this.selectedTargetVideo?.title || this.normalizedTargetId}</span>
-              </div>
-              <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
-                <button class="btn btn-secondary" id="btn-single-cancel">Cancel</button>
-                <button class="btn btn-success" id="btn-single-execute">Test Update</button>
-              </div>
-            </div>
-          `;
-        } else if (this.singleTestState === 'running') {
+        if (this.singleTestState === 'running') {
           executionSectionHtml = `
             <div class="card-box" style="text-align: center; padding: 14px;">
               <span class="badge-pill badge-blue" style="margin-bottom: 6px;">Updating Short...</span>
@@ -934,7 +1097,7 @@ export class DevIndicatorUI {
           };">
               <div style="display: flex; justify-content: space-between; align-items: center;">
                 <span style="font-weight: 700; font-size: 11px; color: ${isSuccess ? '#4ade80' : '#f87171'};">
-                  ${isSuccess ? 'Success — HTTP 200' : `Failed — HTTP ${this.singleTestResult.httpStatus || 'ERR'}`}
+                  ${isSuccess ? 'Success' : 'Update Failed'}
                 </span>
                 <span class="badge-pill ${isSuccess ? 'badge-green' : 'badge-amber'}">
                   ${this.singleTestResult.durationMs ?? 0}ms
@@ -950,144 +1113,86 @@ export class DevIndicatorUI {
                     )}</div>`
                   : ''
               }
-              ${
-                this.singleTestResult.attestationRejected
-                  ? `<div style="font-size: 10px; color: #fbbf24;"><b>Notice:</b> Attestation rejected by YouTube Studio.</div>`
-                  : ''
-              }
               <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
-                <button class="btn btn-secondary" id="btn-single-test-confirm">Run Again</button>
+                <button class="btn btn-secondary btn-sm" id="btn-single-test-confirm">Run Again</button>
               </div>
+            </div>
+          `;
+        } else {
+          executionSectionHtml = `
+            <div class="card-box highlight">
+              <button
+                class="btn btn-primary"
+                id="btn-single-test-confirm"
+                style="width: 100%; padding: 9px;"
+                ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
+              >
+                Assign to Selected Short
+              </button>
             </div>
           `;
         }
       } else {
-        // MULTI-SHORT BULK PATH
-        const isGated = !this.hasSingleTestSucceeded && !this.isGateBypassed;
-
-        if (this.bulkJobState === 'idle') {
-          if (isGated) {
-            executionSectionHtml = `
-              <div class="card-box" style="border-color: #d97706; background: rgba(217, 119, 6, 0.08);">
-                <div style="font-weight: 600; color: #fbbf24; font-size: 11px;">
-                  Safety Gate: Single Short Verification
-                </div>
-                <div style="font-size: 11px; color: #d1d5db; line-height: 1.35;">
-                  Please select <b>1 Short</b> and run a single test first to verify session attestation, before running multi-video updates.
-                </div>
-                <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
-                  <button class="btn btn-secondary" id="btn-bypass-gate" style="font-size: 10px;">
-                    Proceed with Bulk Anyway
-                  </button>
-                </div>
-              </div>
-            `;
-          } else {
-            executionSectionHtml = `
-              <div class="card-box highlight">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                  <span style="font-weight: 600; font-size: 12px; color: #f4f4f5;">Bulk Assignment</span>
-                  <span class="badge-pill badge-green">Ready</span>
-                </div>
-                <div style="font-size: 11px; color: #a1a1aa;">
-                  Assign <span class="mono highlight">${this.selectedTargetVideo?.title || this.normalizedTargetId || '...'}</span> to all <b>${selectedCount}</b> selected Shorts sequentially.
-                </div>
-                <button
-                  class="btn btn-primary"
-                  id="btn-start-bulk"
-                  ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
-                >
-                  Assign to ${selectedCount} Shorts
-                </button>
-              </div>
-            `;
-          }
-        } else if (this.bulkJobState === 'running') {
-          const completedCount = Array.from(this.bulkItemsProgress.values()).filter(
-            (it) => it.status === 'success' || it.status === 'failed' || it.status === 'cancelled'
-          ).length;
-
-          const progressRowsHtml = Array.from(this.bulkItemsProgress.values())
-            .map((it) => {
-              const icon =
-                it.status === 'success'
-                  ? '✓'
-                  : it.status === 'failed'
-                  ? '✗'
-                  : it.status === 'running'
-                  ? '⟳'
-                  : '○';
-              return `
-              <div class="progress-row ${it.status}">
-                <span>${icon} <span class="mono">${it.sourceShortId}</span></span>
-                <span>${it.status.toUpperCase()} ${it.httpStatus ? `(${it.httpStatus})` : ''}</span>
-              </div>
-            `;
-            })
-            .join('');
-
-          executionSectionHtml = `
-            <div class="card-box">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-weight: 600; font-size: 11px; color: #38bdf8;">
-                  Processing: ${completedCount} / ${selectedCount}
-                </span>
-                <button class="btn btn-danger" id="btn-cancel-bulk" style="padding: 2px 8px; font-size: 10px;">
-                  Stop / Cancel
-                </button>
-              </div>
-              <div class="progress-list">
-                ${progressRowsHtml}
-              </div>
-            </div>
-          `;
-        } else if (this.bulkJobState === 'done' || this.bulkJobState === 'cancelled') {
-          const summary = this.bulkSummary;
-          const progressRowsHtml = Array.from(this.bulkItemsProgress.values())
-            .map((it) => {
-              const icon =
-                it.status === 'success'
-                  ? '✓'
-                  : it.status === 'failed'
-                  ? '✗'
-                  : '○';
-              return `
-              <div class="progress-row ${it.status}">
-                <span>${icon} <span class="mono">${it.sourceShortId}</span></span>
-                <span>${it.status.toUpperCase()} ${it.error ? `- ${escapeHtml(it.error)}` : ''}</span>
-              </div>
-            `;
-            })
-            .join('');
-
-          executionSectionHtml = `
-            <div class="card-box" style="border-color: ${
-              summary && summary.failed === 0 ? '#059669' : '#f59e0b'
-            };">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-weight: 700; font-size: 12px; color: #f4f4f5;">
-                  ${this.bulkJobState === 'cancelled' ? 'Operation Cancelled' : 'Bulk Update Complete'}
-                </span>
-                <span class="badge-pill ${summary && summary.failed === 0 ? 'badge-green' : 'badge-amber'}">
-                  ${summary ? `${summary.succeeded} / ${summary.total} Succeeded` : ''}
-                </span>
-              </div>
-              <div class="progress-list">
-                ${progressRowsHtml}
-              </div>
-              <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
-                <button class="btn btn-secondary" id="btn-reset-bulk">Close Summary</button>
-              </div>
-            </div>
-          `;
-        }
+        // Multi-Short Bulk Action
+        executionSectionHtml = `
+          <div class="card-box highlight">
+            <button
+              class="btn btn-primary"
+              id="btn-open-confirm-bulk"
+              style="width: 100%; padding: 10px; font-size: 12px;"
+              ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
+            >
+              Assign to ${selectedCount} Selected Shorts
+            </button>
+          </div>
+        `;
       }
 
-      shortsTabContent = `
-        ${templateNoticeHtml}
+      workflowContent = `
+        ${sessionHintHtml}
         ${targetSelectorHtml}
         ${selectionBarHtml}
         ${executionSectionHtml}
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // CONFIRMATION MODAL OVERLAY
+    // -------------------------------------------------------------
+    let confirmationModalHtml = '';
+    if (this.isConfirmingBulk) {
+      confirmationModalHtml = `
+        <div class="modal-overlay">
+          <div class="modal-header">
+            <span class="modal-title">Confirm Bulk Assignment</span>
+            <button class="modal-close-btn" id="btn-close-confirm">&times;</button>
+          </div>
+          <div style="font-size: 12px; color: #f4f4f5; line-height: 1.4; margin-bottom: 12px;">
+            You are about to assign this Related Video to <b>${selectedCount}</b> selected Shorts:
+          </div>
+          <div class="selected-video-card" style="margin-bottom: 14px;">
+            <img
+              src="${escapeHtml(this.selectedTargetVideo?.thumbnailUrl || `https://i.ytimg.com/vi/${this.normalizedTargetId}/mqdefault.jpg`)}"
+              class="selected-thumb"
+              alt="Thumbnail"
+            />
+            <div class="selected-info">
+              <div class="selected-title">
+                ${escapeHtml(this.selectedTargetVideo?.title || this.normalizedTargetId || '')}
+              </div>
+              <div class="selected-sub">
+                Target ID: <span class="mono">${this.normalizedTargetId}</span>
+              </div>
+            </div>
+          </div>
+          <div style="font-size: 11px; color: #9ca3af; margin-bottom: 16px;">
+            Updates will run sequentially in your browser session. You can stop the process at any time.
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: auto;">
+            <button class="btn btn-secondary" id="btn-close-confirm">Cancel</button>
+            <button class="btn btn-success" id="btn-start-bulk-confirmed">Start Assignment</button>
+          </div>
+        </div>
       `;
     }
 
@@ -1105,7 +1210,7 @@ export class DevIndicatorUI {
           <div style="text-align: center; color: #71717a; padding: 24px 8px; font-size: 11px;">
             ${
               totalCatalogCount === 0
-                ? 'No videos loaded yet from YouTube Studio.<br><button class="btn btn-secondary btn-sm" id="btn-retry-catalog" style="margin-top: 8px;">Refresh / Load Videos</button>'
+                ? 'No channel videos loaded yet.<br><button class="btn btn-secondary btn-sm" id="btn-retry-catalog" style="margin-top: 8px;">Refresh / Load Videos</button>'
                 : `No videos matching "${escapeHtml(this.searchQuery)}"`
             }
           </div>`
@@ -1122,7 +1227,6 @@ export class DevIndicatorUI {
               <div class="video-item-title">${escapeHtml(v.title)}</div>
               <div class="video-item-meta">
                 ${v.duration ? `<span>${escapeHtml(v.duration)}</span> &bull; ` : ''}
-                ${v.videoType ? `<span>${escapeHtml(v.videoType.toUpperCase())}</span> &bull; ` : ''}
                 <span class="mono">${escapeHtml(v.id)}</span>
               </div>
             </div>
@@ -1141,7 +1245,7 @@ export class DevIndicatorUI {
             type="text"
             class="search-input"
             id="picker-search-input"
-            placeholder="🔍 Search by title or video ID..."
+            placeholder="🔍 Search videos by title or ID..."
             value="${escapeHtml(this.searchQuery)}"
           />
           <div class="video-results-list">
@@ -1152,126 +1256,60 @@ export class DevIndicatorUI {
     }
 
     // -------------------------------------------------------------
-    // NETWORK INSPECTOR TAB CONTENT
+    // ADVANCED DIAGNOSTICS SECTION (Collapsible)
     // -------------------------------------------------------------
-    const inspectorTabContent = `
-      <div class="card-box" style="padding: 8px 10px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span class="badge-pill ${this.isCaptureActive ? 'badge-green' : 'badge-amber'}">
-            Capture: ${this.isCaptureActive ? 'ON' : 'OFF'}
-          </span>
-          <button class="btn btn-primary" id="toggle-capture-btn" style="padding: 3px 8px; font-size: 10px;">
-            ${this.isCaptureActive ? 'Stop Capture' : 'Start Capture'}
-          </button>
-        </div>
-      </div>
-      <div style="font-size: 11px; color: #a1a1aa;">
-        ${this.capturedRequests.length} candidate request(s) captured in memory.
-      </div>
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        ${
-          this.capturedRequests.length === 0
-            ? '<div style="text-align: center; color: #71717a; font-size: 11px; padding: 12px 0;">No candidate requests captured yet.</div>'
-            : this.capturedRequests
-                .map(
-                  (req, idx) => `
-          <div class="card-box" style="padding: 8px;">
-            <div style="display: flex; justify-content: space-between; font-size: 11px;">
-              <span class="mono" style="color: #38bdf8;">[${req.method}] ${req.pathname}</span>
-              <span class="badge-pill badge-green">${req.status ?? '200'}</span>
-            </div>
-            <pre class="code-box">${escapeHtml(
-              typeof req.sanitizedBody === 'object'
-                ? JSON.stringify(req.sanitizedBody, null, 2)
-                : String(req.sanitizedBody)
-            )}</pre>
-            <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
-              <button class="btn btn-secondary copy-btn" data-copy-idx="${idx}" style="font-size: 9px; padding: 2px 6px;">
-                Copy JSON
-              </button>
-            </div>
+    let advancedHtml = '';
+    if (this.showAdvanced) {
+      advancedHtml = `
+        <div class="card-box" style="margin-top: 10px; border-color: #52525b; background: #18181b;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 600; font-size: 11px; color: #a1a1aa;">Advanced Diagnostics</span>
+            <span class="badge-pill ${this.isCaptureActive ? 'badge-green' : 'badge-amber'}">
+              Capture: ${this.isCaptureActive ? 'ON' : 'OFF'}
+            </span>
           </div>
-        `
-                )
-                .join('')
-        }
-      </div>
-    `;
+          <div style="display: flex; gap: 6px; margin-top: 4px;">
+            <button class="btn btn-secondary btn-sm" id="toggle-capture-btn">
+              ${this.isCaptureActive ? 'Stop Capture' : 'Start Capture'}
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btn-refresh-catalog-adv">
+              Refresh Video Catalog
+            </button>
+          </div>
+          <div style="font-size: 10px; color: #71717a; margin-top: 4px;">
+            Captured Requests: ${this.capturedRequests.length} in memory &bull; Template: ${this.hasTemplate ? 'Active' : 'None'}
+          </div>
+        </div>
+      `;
+    }
 
     // -------------------------------------------------------------
-    // STUDIO CONTEXT CONTENT
+    // FULL RENDER
     // -------------------------------------------------------------
-    const readableType = this.currentContext.pageType
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-
-    const studioTabContent = `
-      <div class="card-box">
-        <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">Page View:</span>
-          <span class="mono" style="color: #38bdf8;">${readableType}</span>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">Shorts List Detected:</span>
-          <span class="badge-pill ${onShortsList ? 'badge-green' : 'badge-amber'}">${onShortsList ? 'Yes' : 'No'}</span>
-        </div>
-        ${
-          this.currentContext.channelId
-            ? `<div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">Channel ID:</span>
-          <span class="mono">${this.currentContext.channelId}</span>
-        </div>`
-            : ''
-        }
-        <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">Catalog Videos in Memory:</span>
-          <span class="badge-pill badge-green">${this.catalogStore.count()}</span>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: #a1a1aa;">Template in Memory:</span>
-          <span class="badge-pill ${this.hasTemplate ? 'badge-green' : 'badge-amber'}">${this.hasTemplate ? 'Active' : 'None'}</span>
-        </div>
-      </div>
-    `;
-
-    // Full Render
     this.shadowRoot.innerHTML = `
       <style>${css}</style>
       <div class="panel-container">
+        ${confirmationModalHtml}
         ${pickerModalHtml}
 
         <div class="header-row">
           <div class="title-group">
             <span class="pulse-dot"></span>
-            <span class="main-title">ShortLinker &bull; Shorts Manager</span>
+            <span class="main-title">ShortLinker &bull; Related Video</span>
           </div>
-          <button class="minimize-btn" id="min-btn" title="Minimize indicator">_</button>
+          <button class="minimize-btn" id="min-btn" title="Minimize">_</button>
         </div>
 
-        <div class="tab-bar">
-          <button class="tab-btn ${this.activeTab === 'shorts' ? 'active' : ''}" id="tab-shorts">
-            Shorts Linker ${selectedCount > 0 ? `(${selectedCount})` : ''}
-          </button>
-          <button class="tab-btn ${this.activeTab === 'inspector' ? 'active' : ''}" id="tab-inspector">
-            Network Inspector
-          </button>
-          <button class="tab-btn ${this.activeTab === 'studio' ? 'active' : ''}" id="tab-studio">
-            Context
-          </button>
-        </div>
-
-        <div class="tab-content">
-          ${
-            this.activeTab === 'shorts'
-              ? shortsTabContent
-              : this.activeTab === 'inspector'
-              ? inspectorTabContent
-              : studioTabContent
-          }
+        <div class="scroll-body">
+          ${onboardingHtml}
+          ${workflowContent}
+          ${advancedHtml}
         </div>
 
         <div class="footer-note">
-          <span>Local session &bull; Zero credentials stored</span>
+          <button class="text-link" id="btn-toggle-advanced" style="font-size: 10px; color: #71717a;">
+            ⚙ ${this.showAdvanced ? 'Hide Advanced' : 'Advanced'}
+          </button>
           <span>Open Source</span>
         </div>
       </div>
@@ -1284,18 +1322,13 @@ export class DevIndicatorUI {
       this.toggleMinimize();
     });
 
-    this.shadowRoot.getElementById('tab-shorts')?.addEventListener('click', () => {
-      this.activeTab = 'shorts';
+    this.shadowRoot.getElementById('btn-dismiss-onboarding')?.addEventListener('click', () => {
+      this.isOnboardingDismissed = true;
       this.render();
     });
 
-    this.shadowRoot.getElementById('tab-inspector')?.addEventListener('click', () => {
-      this.activeTab = 'inspector';
-      this.render();
-    });
-
-    this.shadowRoot.getElementById('tab-studio')?.addEventListener('click', () => {
-      this.activeTab = 'studio';
+    this.shadowRoot.getElementById('btn-toggle-advanced')?.addEventListener('click', () => {
+      this.showAdvanced = !this.showAdvanced;
       this.render();
     });
 
@@ -1307,7 +1340,6 @@ export class DevIndicatorUI {
         this.requestCatalogRefresh();
       }
       this.render();
-      // Auto-focus search input
       setTimeout(() => {
         const searchInput = this.shadowRoot?.getElementById('picker-search-input') as HTMLInputElement | null;
         searchInput?.focus();
@@ -1332,12 +1364,15 @@ export class DevIndicatorUI {
       this.requestCatalogRefresh();
     });
 
+    this.shadowRoot.getElementById('btn-refresh-catalog-adv')?.addEventListener('click', () => {
+      this.requestCatalogRefresh();
+    });
+
     // Search input binding
     const searchInputEl = this.shadowRoot.getElementById('picker-search-input') as HTMLInputElement | null;
     searchInputEl?.addEventListener('input', (e) => {
       this.searchQuery = (e.target as HTMLInputElement).value;
       this.render();
-      // Keep focus after re-render
       setTimeout(() => {
         const inp = this.shadowRoot?.getElementById('picker-search-input') as HTMLInputElement | null;
         if (inp) {
@@ -1368,26 +1403,21 @@ export class DevIndicatorUI {
 
     // Single Short test bindings
     this.shadowRoot.getElementById('btn-single-test-confirm')?.addEventListener('click', () => {
-      this.singleTestState = 'confirming';
-      this.render();
-    });
-
-    this.shadowRoot.getElementById('btn-single-cancel')?.addEventListener('click', () => {
-      this.singleTestState = 'idle';
-      this.render();
-    });
-
-    this.shadowRoot.getElementById('btn-single-execute')?.addEventListener('click', () => {
       this.executeSingleShortTest();
     });
 
-    // Bulk execution bindings
-    this.shadowRoot.getElementById('btn-bypass-gate')?.addEventListener('click', () => {
-      this.isGateBypassed = true;
+    // Bulk Confirmation Modal bindings
+    this.shadowRoot.getElementById('btn-open-confirm-bulk')?.addEventListener('click', () => {
+      this.isConfirmingBulk = true;
       this.render();
     });
 
-    this.shadowRoot.getElementById('btn-start-bulk')?.addEventListener('click', () => {
+    this.shadowRoot.getElementById('btn-close-confirm')?.addEventListener('click', () => {
+      this.isConfirmingBulk = false;
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-start-bulk-confirmed')?.addEventListener('click', () => {
       this.executeBulkAssignment();
     });
 
@@ -1402,19 +1432,18 @@ export class DevIndicatorUI {
       this.render();
     });
 
-    // Inspector bindings
-    this.shadowRoot.getElementById('toggle-capture-btn')?.addEventListener('click', () => {
-      this.toggleCapture();
+    this.shadowRoot.getElementById('btn-retry-failed')?.addEventListener('click', () => {
+      this.retryFailedItems();
     });
 
-    this.shadowRoot.querySelectorAll<HTMLButtonElement>('.copy-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-copy-idx'));
-        const targetReq = this.capturedRequests[idx];
-        if (targetReq) {
-          this.copyToClipboard(JSON.stringify(targetReq, null, 2), btn);
-        }
-      });
+    const copyFailedBtn = this.shadowRoot.getElementById('btn-copy-failed') as HTMLButtonElement | null;
+    copyFailedBtn?.addEventListener('click', () => {
+      this.copyFailedIds(copyFailedBtn);
+    });
+
+    // Advanced Diagnostics bindings
+    this.shadowRoot.getElementById('toggle-capture-btn')?.addEventListener('click', () => {
+      this.toggleCapture();
     });
   }
 }

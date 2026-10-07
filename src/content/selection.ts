@@ -3,6 +3,8 @@
  * Maps: YouTube list row -> selected checkbox -> video ID.
  */
 
+import { isValidYouTubeVideoId } from '../common/youtube';
+
 const VIDEO_ID_REGEX = /\/video\/([a-zA-Z0-9_-]{11})/;
 
 export type SelectionChangeCallback = (selectedVideoIds: string[]) => void;
@@ -24,12 +26,20 @@ export class ShortsSelectionTracker {
   public scanSelectedVideoIds(): string[] {
     const foundIds = new Set<string>();
 
-    // Strategy 1: Inspect all row containers
+    // Strategy 1: Inspect all row containers (excluding table headers)
     const rows = document.querySelectorAll(
       'ytcp-video-row, ytcp-entity-row, [role="row"], .ytcp-video-row'
     );
 
     for (const row of Array.from(rows)) {
+      // Exclude header rows completely
+      if (
+        row.closest('ytcp-table-header, ytcp-video-section-header, thead') ||
+        row.matches('ytcp-table-header, ytcp-table-header *, thead, [role="columnheader"]')
+      ) {
+        continue;
+      }
+
       // Check if this row's checkbox is selected
       const checkbox = row.querySelector(
         'ytcp-checkbox, ytcp-checkbox-lit, input[type="checkbox"], [role="checkbox"]'
@@ -45,7 +55,7 @@ export class ShortsSelectionTracker {
 
       if (isChecked) {
         const videoId = this.extractVideoIdFromRow(row);
-        if (videoId) {
+        if (videoId && isValidYouTubeVideoId(videoId)) {
           foundIds.add(videoId);
         }
       }
@@ -58,13 +68,13 @@ export class ShortsSelectionTracker {
 
     for (const el of Array.from(checkedElements)) {
       // Ignore header "Select All" checkbox when searching for individual video IDs
-      if (el.closest('ytcp-table-header, ytcp-video-section-header, thead')) {
+      if (el.closest('ytcp-table-header, ytcp-video-section-header, thead, [role="columnheader"]')) {
         continue;
       }
       const row = el.closest('ytcp-video-row, [role="row"], ytcp-entity-row, .table-row');
-      if (row) {
+      if (row && !row.closest('ytcp-table-header, ytcp-video-section-header, thead')) {
         const videoId = this.extractVideoIdFromRow(row);
-        if (videoId) {
+        if (videoId && isValidYouTubeVideoId(videoId)) {
           foundIds.add(videoId);
         }
       }
@@ -74,33 +84,41 @@ export class ShortsSelectionTracker {
   }
 
   /**
-   * Extracts the 11-char video ID from a row element.
+   * Extracts the genuine 11-char video ID from a row element.
    */
   public extractVideoIdFromRow(row: Element): string | null {
+    // Immediately reject any header element
+    if (
+      row.closest('ytcp-table-header, ytcp-video-section-header, thead') ||
+      row.matches('ytcp-table-header, thead, [role="columnheader"]')
+    ) {
+      return null;
+    }
+
     // 1. Link with /video/<id>/...
     const links = row.querySelectorAll('a[href*="/video/"]');
     for (const link of Array.from(links)) {
       const href = link.getAttribute('href') || '';
       const match = href.match(VIDEO_ID_REGEX);
-      if (match && match[1]) {
+      if (match && match[1] && isValidYouTubeVideoId(match[1])) {
         return match[1];
       }
     }
 
-    // 2. Data attributes or ID on row
+    // 2. Data attributes on row
     const attrId =
       row.getAttribute('video-id') ||
       row.getAttribute('data-video-id') ||
       (row as HTMLElement).dataset?.videoId;
 
-    if (attrId && /^[a-zA-Z0-9_-]{11}$/.test(attrId)) {
+    if (attrId && isValidYouTubeVideoId(attrId)) {
       return attrId;
     }
 
-    // 3. ID attribute containing video ID pattern
+    // 3. ID attribute containing video ID pattern (strictly validated against false DOM IDs)
     const rowId = row.id || '';
     const idMatch = rowId.match(/([a-zA-Z0-9_-]{11})/);
-    if (idMatch && idMatch[1]) {
+    if (idMatch && idMatch[1] && isValidYouTubeVideoId(idMatch[1])) {
       return idMatch[1];
     }
 
