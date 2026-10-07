@@ -8,6 +8,32 @@ export function isYouTubeStudio(): boolean {
 }
 
 /**
+ * Checks whether the user is on the YouTube Studio Shorts List View.
+ */
+export function isShortsListView(): boolean {
+  if (!isYouTubeStudio()) return false;
+  const pathname = window.location.pathname.toLowerCase();
+  const search = window.location.search.toLowerCase();
+
+  if (pathname.includes('/videos/short') || pathname.includes('/videos/shorts')) {
+    return true;
+  }
+  if (pathname.includes('/videos') && (search.includes('short') || search.includes('d=short'))) {
+    return true;
+  }
+  // Check active tab in DOM if on /videos
+  if (pathname.includes('/videos')) {
+    const activeTab = document.querySelector(
+      'paper-tab.iron-selected, tp-yt-paper-tab.iron-selected, [aria-selected="true"]'
+    );
+    if (activeTab?.textContent?.toLowerCase().includes('short')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Parses current YouTube Studio context from URL and DOM.
  */
 export function getStudioContext(): StudioPageContext {
@@ -37,7 +63,7 @@ export function getStudioContext(): StudioPageContext {
   }
 
   // Classify page type
-  if (pathname.includes('/videos/short')) {
+  if (isShortsListView()) {
     pageType = 'content_shorts';
   } else if (pathname.includes('/videos/upload') || pathname.endsWith('/videos')) {
     pageType = 'content_uploads';

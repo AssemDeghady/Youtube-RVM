@@ -1,6 +1,15 @@
 import { filterSafeHeaders, parseAndSanitizeBody, redactSensitiveData } from '../common/sanitizer';
 import { isCandidateRequest, isRelatedVideoMutation } from '../common/filter';
-import { BRIDGE_EVENTS, CapturedRequest, RelatedVideoMutationMeta, ReplayResult } from '../types';
+import { buildRelatedVideoPayload } from '../common/youtube';
+import {
+  BRIDGE_EVENTS,
+  CapturedRequest,
+  RelatedVideoMutationMeta,
+  ReplayResult,
+  MutationExecutePayload,
+  MutationItemProgress,
+  MutationJobSummary
+} from '../types';
 
 declare global {
   interface Window {
@@ -16,7 +25,7 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
   window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED = true;
   window.SHORTLINKER_INSPECTOR_ACTIVE = false; // Default: OFF
 
-  // Volatile in-memory store for ONE captured Related Video mutation
+  // Volatile in-memory store for ONE captured Related Video mutation template
   // NEVER persisted to storage, files, or external networks.
   interface StoredRawMutation {
     url: string;
@@ -29,7 +38,9 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     flowType?: string;
     hasAttestation: boolean;
   }
+
   let lastRawMutation: StoredRawMutation | null = null;
+  let activeJobCancellationFlag = false;
 
   console.info(
     '%c[ShortLinker Interceptor] Passive network listener installed in MAIN world (Status: OFF).',
@@ -69,10 +80,23 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
     document.dispatchEvent(customEvent);
 
     console.info(
-      `%c[ShortLinker Interceptor] Related Video Mutation Detected: Short [${meta.sourceVideoId}] → Target [${meta.targetVideoId}]`,
+      `%c[ShortLinker Interceptor] Related Video Mutation Template Ready: Short [${meta.sourceVideoId}] → Target [${meta.targetVideoId}]`,
       'background: #064e3b; color: #34d399; font-weight: bold; padding: 3px 8px; border-radius: 4px;'
     );
   }
+
+  // Handle template status requests from UI
+  document.addEventListener(BRIDGE_EVENTS.TEMPLATE_STATUS_REQUEST, () => {
+    const responseEvent = new CustomEvent(BRIDGE_EVENTS.TEMPLATE_STATUS_RESPONSE, {
+      detail: {
+        hasTemplate: Boolean(lastRawMutation),
+        sourceVideoId: lastRawMutation?.sourceVideoId,
+        targetVideoId: lastRawMutation?.targetVideoId,
+        timestamp: lastRawMutation?.timestamp
+      }
+    });
+    document.dispatchEvent(responseEvent);
+  });
 
   // ==========================================
   // 2. Passive window.fetch Interception
@@ -136,7 +160,42 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
       throw fetchErr;
     }
 
-    // Only process candidates when capture is ON
+    // Process potential Related Video mutations (always cache template if detected)
+    const mutationCheck = isRelatedVideoMutation(urlStr, method, rawBody);
+    if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
+      let parsedBodyForStorage = rawBody;
+      if (typeof rawBody === 'string') {
+        try {
+          parsedBodyForStorage = JSON.parse(rawBody);
+        } catch {
+          parsedBodyForStorage = rawBody;
+        }
+      }
+
+      lastRawMutation = {
+        url: urlStr,
+        method: method.toUpperCase(),
+        headers: reqHeaders,
+        rawBody: parsedBodyForStorage,
+        sourceVideoId: mutationCheck.sourceVideoId,
+        targetVideoId: mutationCheck.targetVideoId,
+        timestamp: new Date().toLocaleTimeString(),
+        flowType: mutationCheck.flowType,
+        hasAttestation: Boolean(mutationCheck.hasAttestation)
+      };
+
+      broadcastMutationDetected({
+        sourceVideoId: mutationCheck.sourceVideoId,
+        targetVideoId: mutationCheck.targetVideoId,
+        timestamp: new Date().toLocaleTimeString(),
+        httpStatus: response.status,
+        pathname: new URL(urlStr, window.location.origin).pathname,
+        flowType: mutationCheck.flowType,
+        hasAttestation: Boolean(mutationCheck.hasAttestation)
+      });
+    }
+
+    // Process general candidate requests if capture is ON
     if (window.SHORTLINKER_INSPECTOR_ACTIVE) {
       const { isCandidate } = isCandidateRequest(urlStr, method);
       if (isCandidate) {
@@ -164,34 +223,6 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
           };
 
           broadcastCapture(captured);
-
-          // Check specifically for Related Video mutation
-          const mutationCheck = isRelatedVideoMutation(urlStr, method, rawBody);
-          if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
-            // Save raw request into volatile memory ONLY
-            lastRawMutation = {
-              url: urlStr,
-              method: method.toUpperCase(),
-              headers: reqHeaders,
-              rawBody,
-              sourceVideoId: mutationCheck.sourceVideoId,
-              targetVideoId: mutationCheck.targetVideoId,
-              timestamp: new Date().toLocaleTimeString(),
-              flowType: mutationCheck.flowType,
-              hasAttestation: Boolean(mutationCheck.hasAttestation)
-            };
-
-            // Broadcast safe metadata to Isolated UI (credentials strictly excluded)
-            broadcastMutationDetected({
-              sourceVideoId: mutationCheck.sourceVideoId,
-              targetVideoId: mutationCheck.targetVideoId,
-              timestamp: new Date().toLocaleTimeString(),
-              httpStatus: response.status,
-              pathname: parsedUrl.pathname,
-              flowType: mutationCheck.flowType,
-              hasAttestation: Boolean(mutationCheck.hasAttestation)
-            });
-          }
         } catch (captureErr) {
           console.warn('[ShortLinker Interceptor] Error capturing fetch candidate:', captureErr);
         }
@@ -254,76 +285,87 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     const meta = xhrMetadataMap.get(this);
 
-    if (window.SHORTLINKER_INSPECTOR_ACTIVE && meta) {
-      const { isCandidate } = isCandidateRequest(meta.url, meta.method);
-      if (isCandidate) {
-        this.addEventListener(
-          'loadend',
-          () => {
-            try {
-              const durationMs = Math.round(performance.now() - meta.startTime);
-              const parsedUrl = new URL(meta.url, window.location.origin);
-              const contentType = meta.headers['content-type'] || meta.headers['Content-Type'] || '';
-              const { sanitizedBody, bodyType } = parseAndSanitizeBody(body, contentType);
-              const safeHeaders = filterSafeHeaders(meta.headers);
+    if (meta) {
+      this.addEventListener(
+        'loadend',
+        () => {
+          try {
+            const mutationCheck = isRelatedVideoMutation(meta.url, meta.method, body);
+            if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
+              let parsedBodyForStorage = body;
+              if (typeof body === 'string') {
+                try {
+                  parsedBodyForStorage = JSON.parse(body);
+                } catch {
+                  parsedBodyForStorage = body;
+                }
+              }
 
-              const captured: CapturedRequest = {
-                id: `xhr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                timestamp: new Date().toLocaleTimeString(),
+              lastRawMutation = {
+                url: meta.url,
                 method: meta.method.toUpperCase(),
-                url: parsedUrl.href,
-                hostname: parsedUrl.hostname,
-                pathname: parsedUrl.pathname,
-                contentType: contentType || 'unspecified',
-                safeHeaders,
-                sanitizedBody,
-                bodyType,
-                status: this.status,
-                statusText: this.statusText,
-                durationMs,
-                source: 'xhr'
+                headers: meta.headers,
+                rawBody: parsedBodyForStorage,
+                sourceVideoId: mutationCheck.sourceVideoId,
+                targetVideoId: mutationCheck.targetVideoId,
+                timestamp: new Date().toLocaleTimeString(),
+                flowType: mutationCheck.flowType,
+                hasAttestation: Boolean(mutationCheck.hasAttestation)
               };
 
-              broadcastCapture(captured);
+              broadcastMutationDetected({
+                sourceVideoId: mutationCheck.sourceVideoId,
+                targetVideoId: mutationCheck.targetVideoId,
+                timestamp: new Date().toLocaleTimeString(),
+                httpStatus: this.status,
+                pathname: new URL(meta.url, window.location.origin).pathname,
+                flowType: mutationCheck.flowType,
+                hasAttestation: Boolean(mutationCheck.hasAttestation)
+              });
+            }
 
-              const mutationCheck = isRelatedVideoMutation(meta.url, meta.method, body);
-              if (mutationCheck.isRelatedVideoMutation && mutationCheck.sourceVideoId && mutationCheck.targetVideoId) {
-                lastRawMutation = {
-                  url: meta.url,
-                  method: meta.method.toUpperCase(),
-                  headers: meta.headers,
-                  rawBody: body,
-                  sourceVideoId: mutationCheck.sourceVideoId,
-                  targetVideoId: mutationCheck.targetVideoId,
+            if (window.SHORTLINKER_INSPECTOR_ACTIVE) {
+              const { isCandidate } = isCandidateRequest(meta.url, meta.method);
+              if (isCandidate) {
+                const durationMs = Math.round(performance.now() - meta.startTime);
+                const parsedUrl = new URL(meta.url, window.location.origin);
+                const contentType = meta.headers['content-type'] || meta.headers['Content-Type'] || '';
+                const { sanitizedBody, bodyType } = parseAndSanitizeBody(body, contentType);
+                const safeHeaders = filterSafeHeaders(meta.headers);
+
+                const captured: CapturedRequest = {
+                  id: `xhr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
                   timestamp: new Date().toLocaleTimeString(),
-                  flowType: mutationCheck.flowType,
-                  hasAttestation: Boolean(mutationCheck.hasAttestation)
+                  method: meta.method.toUpperCase(),
+                  url: parsedUrl.href,
+                  hostname: parsedUrl.hostname,
+                  pathname: parsedUrl.pathname,
+                  contentType: contentType || 'unspecified',
+                  safeHeaders,
+                  sanitizedBody,
+                  bodyType,
+                  status: this.status,
+                  statusText: this.statusText,
+                  durationMs,
+                  source: 'xhr'
                 };
 
-                broadcastMutationDetected({
-                  sourceVideoId: mutationCheck.sourceVideoId,
-                  targetVideoId: mutationCheck.targetVideoId,
-                  timestamp: new Date().toLocaleTimeString(),
-                  httpStatus: this.status,
-                  pathname: parsedUrl.pathname,
-                  flowType: mutationCheck.flowType,
-                  hasAttestation: Boolean(mutationCheck.hasAttestation)
-                });
+                broadcastCapture(captured);
               }
-            } catch (captureErr) {
-              console.warn('[ShortLinker Interceptor] Error capturing XHR candidate:', captureErr);
             }
-          },
-          { once: true }
-        );
-      }
+          } catch (captureErr) {
+            console.warn('[ShortLinker Interceptor] Error capturing XHR candidate:', captureErr);
+          }
+        },
+        { once: true }
+      );
     }
 
     return originalSend.call(this, body);
   };
 
   // ==========================================
-  // 4. Controlled Single-Mutation Replay
+  // 4. Single Mutation Replay (Debug / Verification)
   // ==========================================
   document.addEventListener(BRIDGE_EVENTS.REPLAY_REQUEST, async () => {
     if (!lastRawMutation) {
@@ -348,11 +390,15 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
 
     const startTime = performance.now();
     try {
-      // Replay in MAIN-world page context using the captured headers and body
+      const payloadString =
+        typeof lastRawMutation.rawBody === 'string'
+          ? lastRawMutation.rawBody
+          : JSON.stringify(lastRawMutation.rawBody);
+
       const response = await originalFetch(lastRawMutation.url, {
         method: lastRawMutation.method,
         headers: lastRawMutation.headers,
-        body: lastRawMutation.rawBody,
+        body: payloadString,
         credentials: 'same-origin'
       });
 
@@ -393,12 +439,6 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
       };
 
       document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_RESPONSE, { detail: result }));
-
-      console.info(
-        `%c[ShortLinker Replay] Result: ${isSuccess ? 'SUCCESS' : 'FAILED'} (HTTP ${response.status})`,
-        `font-weight: bold; color: ${isSuccess ? '#22c55e' : '#ef4444'};`,
-        result
-      );
     } catch (err: any) {
       const durationMs = Math.round(performance.now() - startTime);
       const result: ReplayResult = {
@@ -414,4 +454,174 @@ if (window.SHORTLINKER_NETWORK_INSPECTOR_INSTALLED) {
       document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_RESPONSE, { detail: result }));
     }
   });
+
+  // ==========================================
+  // 5. Execution Pipeline (Single & Multi-Short)
+  // ==========================================
+  document.addEventListener(BRIDGE_EVENTS.CANCEL_MUTATION, () => {
+    activeJobCancellationFlag = true;
+    console.info('[ShortLinker Interceptor] Cancel signal received for active mutation queue.');
+  });
+
+  document.addEventListener(BRIDGE_EVENTS.EXECUTE_MUTATION, (async (evt: Event) => {
+    const event = evt as CustomEvent<MutationExecutePayload>;
+    const payload = event.detail;
+    if (!payload || !payload.sourceShortIds || payload.sourceShortIds.length === 0) {
+      return;
+    }
+
+    const { jobId, sourceShortIds, targetVideoId, delayMs = 800 } = payload;
+    activeJobCancellationFlag = false;
+
+    if (!lastRawMutation) {
+      const failedSummary: MutationJobSummary = {
+        jobId,
+        total: sourceShortIds.length,
+        completed: sourceShortIds.length,
+        succeeded: 0,
+        failed: sourceShortIds.length,
+        isCancelled: false,
+        items: sourceShortIds.map((id) => ({
+          sourceShortId: id,
+          targetVideoId,
+          status: 'failed',
+          httpStatus: 0,
+          error: 'Mutation template required. Please save a Related Video manually in Studio first.'
+        }))
+      };
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_COMPLETE, { detail: failedSummary }));
+      return;
+    }
+
+    console.info(
+      `%c[ShortLinker Queue] Starting execution of ${sourceShortIds.length} Short(s) with target [${targetVideoId}]`,
+      'background: #1e3a8a; color: #60a5fa; font-weight: bold; padding: 3px 8px; border-radius: 4px;'
+    );
+
+    const items: MutationItemProgress[] = [];
+    let succeededCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < sourceShortIds.length; i++) {
+      const sourceShortId = sourceShortIds[i];
+
+      // Check if user cancelled
+      if (activeJobCancellationFlag) {
+        const cancelledItem: MutationItemProgress = {
+          sourceShortId,
+          targetVideoId,
+          status: 'cancelled',
+          error: 'Operation cancelled by user'
+        };
+        items.push(cancelledItem);
+        document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: cancelledItem }));
+        continue;
+      }
+
+      // Signal running state for current item
+      const runningProgress: MutationItemProgress = {
+        sourceShortId,
+        targetVideoId,
+        status: 'running'
+      };
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: runningProgress }));
+
+      const startTime = performance.now();
+      try {
+        // Construct request payload with this specific Short ID
+        const reqBody = buildRelatedVideoPayload(
+          lastRawMutation.rawBody,
+          sourceShortId,
+          targetVideoId
+        );
+
+        const response = await originalFetch(lastRawMutation.url, {
+          method: 'POST',
+          headers: lastRawMutation.headers,
+          body: JSON.stringify(reqBody),
+          credentials: 'same-origin'
+        });
+
+        const durationMs = Math.round(performance.now() - startTime);
+        const responseText = await response.text();
+
+        let isSuccess = response.ok && response.status === 200;
+        let attestationRejected = false;
+        let errorMsg = '';
+
+        try {
+          const parsed = JSON.parse(responseText);
+          if (parsed.error || response.status >= 400) {
+            isSuccess = false;
+            errorMsg = parsed.error?.message || parsed.error?.status || response.statusText;
+            const errStr = JSON.stringify(parsed.error || '').toLowerCase();
+            if (errStr.includes('attestation') || errStr.includes('challenge') || errStr.includes('token')) {
+              attestationRejected = true;
+            }
+          }
+        } catch {
+          if (!response.ok) {
+            isSuccess = false;
+            errorMsg = response.statusText || `HTTP ${response.status}`;
+          }
+        }
+
+        const itemResult: MutationItemProgress = {
+          sourceShortId,
+          targetVideoId,
+          status: isSuccess ? 'success' : 'failed',
+          httpStatus: response.status,
+          statusText: response.statusText,
+          durationMs,
+          error: errorMsg || undefined,
+          attestationRejected
+        };
+
+        if (isSuccess) {
+          succeededCount++;
+        } else {
+          failedCount++;
+        }
+
+        items.push(itemResult);
+        document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
+
+        // Sequential delay between requests if more items remain
+        if (i < sourceShortIds.length - 1 && !activeJobCancellationFlag && delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      } catch (err: any) {
+        failedCount++;
+        const durationMs = Math.round(performance.now() - startTime);
+        const itemResult: MutationItemProgress = {
+          sourceShortId,
+          targetVideoId,
+          status: 'failed',
+          httpStatus: 0,
+          statusText: 'Network Exception',
+          durationMs,
+          error: err?.message || 'Network exception during fetch'
+        };
+        items.push(itemResult);
+        document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_PROGRESS, { detail: itemResult }));
+      }
+    }
+
+    const summary: MutationJobSummary = {
+      jobId,
+      total: sourceShortIds.length,
+      completed: items.length,
+      succeeded: succeededCount,
+      failed: failedCount,
+      isCancelled: activeJobCancellationFlag,
+      items
+    };
+
+    console.info(
+      `%c[ShortLinker Queue] Completed job ${jobId}: ${succeededCount} succeeded, ${failedCount} failed`,
+      `font-weight: bold; color: ${failedCount === 0 ? '#22c55e' : '#f59e0b'};`
+    );
+
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.MUTATION_COMPLETE, { detail: summary }));
+  }) as EventListener);
 }

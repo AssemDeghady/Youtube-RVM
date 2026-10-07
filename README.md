@@ -22,11 +22,12 @@ Everything in this project is built around privacy, simplicity, and keeping comp
 
 • Free and open source forever: No subscriptions, no locked tiers, and no hidden telemetry.
 
-## Current status: Research & Proof of Concept
+## Current status: Shorts List View MVP
 
-Right now, this repository is in its initial discovery phase. Before we write any automation to update videos, we need to know the exact internal request structure YouTube Studio uses when saving a Related Video.
+The extension now operates directly from the YouTube Studio Shorts List View:
+studio.youtube.com/channel/.../videos/short
 
-This repository provides a lightweight Manifest V3 development extension with an integrated passive network inspector. It runs cleanly on YouTube Studio, tracks single-page navigation, and lets developers capture the exact save payload with zero risk of modifying any account data.
+Creators can select multiple Shorts using YouTube Studio's own table checkboxes, paste one target video URL or ID, and assign the Related Video to all selected Shorts sequentially without ever opening individual video details pages.
 
 ## Project overview
 
@@ -35,10 +36,11 @@ youtube_rvm/
   dist/                  Compiled extension ready to load into Chrome
   public/                Manifest and icon assets
   scripts/build.mjs      Vite build script producing self-contained bundles
+  scripts/test.mjs       Automated unit test suite
   src/
-    common/              Filters, mutation recognition, and sensitive data redactor
-    content/             Studio detector, navigation listener, and dev UI
-    interceptor/         Passive fetch and XHR observer with in-memory replay
+    common/              Filters, YouTube URL normalizer, and sensitive data redactor
+    content/             Studio detector, selection tracker, and panel UI
+    interceptor/         MAIN-world fetch observer and sequential mutation executor
     types/               Shared TypeScript interfaces
   package.json           Dependencies and build scripts
   tsconfig.json          Strict TypeScript configuration
@@ -53,7 +55,10 @@ You will need Node.js (version 18 or newer) and npm installed on your computer.
 2. Install dependencies:
    npm install
 
-3. Build the extension:
+3. Run automated tests:
+   npm test
+
+4. Build the extension:
    npm run build
 
 If you want the bundler to automatically rebuild whenever you make changes to the source files, run:
@@ -68,42 +73,30 @@ If you want the bundler to automatically rebuild whenever you make changes to th
 5. Choose the dist directory inside this project folder.
 6. The extension is now active and ready.
 
-## How to capture the Related Video save request
-
-We need help capturing one real save request so we can map out the payload schema. Here is how you can do it in two minutes:
+## How to use the Shorts List View Assigner
 
 1. Open studio.youtube.com in your browser while signed in.
-2. In the bottom right corner of the page, you will see a small dark card titled ShortLinker POC.
-3. Click the Network Inspector tab on the card.
-4. Navigate inside YouTube Studio to Content, switch to the Shorts tab, and click any Short to open its details editor.
-5. Back on the ShortLinker card, click the blue Start Capture button. The status indicator will turn green.
-6. In the YouTube editor, scroll down to the Related video field, pick any video, and click the blue SAVE button in the upper right corner of YouTube Studio.
-7. Look at the ShortLinker card. You will see a new entry appear showing the captured endpoint and status.
-8. Click the Copy JSON button on that card.
-9. Click Stop Capture, and paste the copied snippet into our project discussion or issue tracker.
-
-## Testing single-video replay
-
-Once a Related Video mutation is captured during your session, the extension displays a green Related Video Mutation card showing the Source Short and the chosen Related Video target ID.
-
-To verify whether your active browser session can reproduce the update without any third-party APIs:
-
-1. On the ShortLinker card, locate the Related Video Mutation box.
-2. Click the blue Test Replay button.
-3. A confirmation dialog will appear explaining that this will replay the last captured Related Video update for the same Short and Related Video.
-4. Click Replay to confirm.
-5. The extension will perform the exact request in the main page context using your existing session.
-6. You will immediately see the result displayed as either Success with HTTP 200 or Failed with the status code and sanitized error snippet.
+2. Navigate to Content in the left menu, then switch to the Shorts tab.
+3. In the bottom right corner, open the ShortLinker card. The Shorts Linker tab is active.
+4. Select one or more Shorts using YouTube Studio's regular table checkboxes.
+5. Paste any target video into the Related Video input box:
+   • Regular watch link: https://www.youtube.com/watch?v=VIDEO_ID
+   • Shortened link: https://youtu.be/VIDEO_ID
+   • Shorts link: https://www.youtube.com/shorts/VIDEO_ID
+   • Or raw 11-character video ID
+6. Safety First: If you select 1 Short, click Test Update on this Short to verify that your active session accepts the update.
+7. Once verified, select any number of Shorts and click Assign to Shorts.
+8. The extension executes each update sequentially with a gentle delay, showing live per-video progress and a Stop button to pause at any time.
 
 ## Built-in safety precautions
 
-The network inspector was engineered with strict guardrails:
+The extension was engineered with strict guardrails:
 
-• Strictly passive: It wraps the browser's native network calls without touching or modifying any outgoing requests, headers, or responses.
+• In-memory session execution: All updates are made through your browser session in the main page world. No credentials, cookies, or auth tokens are ever logged, stored, or sent across the bridge.
 
-• Deep automatic redaction: Before any request body is displayed or copied, all sensitive keys such as tokens, auth hashes, cookies, and session strings are recursively replaced with redacted placeholders.
+• Safe sequential processing: Mutations run one by one with a configurable pause between requests. We never fire simultaneous bulk requests that could overload your session.
 
-• Safe headers only: Sensitive headers like Cookie and Authorization are stripped immediately. Only non-sensitive metadata such as Content-Type is displayed.
+• Deep automatic redaction: All sensitive keys such as tokens, auth hashes, cookies, and session strings are recursively replaced with redacted placeholders in all diagnostic views.
 
 • In-memory only: Captured requests live in browser memory during your session. Nothing is ever written to disk, local storage, or external logs.
 

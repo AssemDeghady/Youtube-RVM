@@ -1,5 +1,6 @@
 import { isYouTubeStudio, getStudioContext, logStudioDiagnostics } from './detector';
 import { StudioNavigationObserver } from './navigation';
+import { ShortsSelectionTracker } from './selection';
 import { DevIndicatorUI } from './ui';
 
 function ensureInterceptorInstalled(): void {
@@ -40,15 +41,27 @@ function initializeShortLinkerPOC(): void {
     });
   }
 
+  // Initialize Shorts list selection tracker
+  const selectionTracker = new ShortsSelectionTracker();
+  selectionTracker.onSelectionChange((selectedIds) => {
+    devUI.updateSelection(selectedIds);
+  });
+  selectionTracker.start();
+
   // Initialize SPA Navigation Observer
   const navObserver = new StudioNavigationObserver();
   navObserver.onNavigate((newContext) => {
     devUI.updateContext(newContext);
+    // Trigger fresh selection scan after route transition
+    setTimeout(() => {
+      const ids = selectionTracker.scanSelectedVideoIds();
+      devUI.updateSelection(ids);
+    }, 200);
   });
   navObserver.start();
 
   console.info(
-    '%c[ShortLinker POC] Content script successfully loaded with Network Inspector support.',
+    '%c[ShortLinker POC] Content script loaded with Shorts List View bulk management support.',
     'color: #22c55e; font-weight: bold;'
   );
 }

@@ -1,4 +1,15 @@
-import { StudioPageContext, CapturedRequest, RelatedVideoMutationMeta, ReplayResult, BRIDGE_EVENTS } from '../types';
+import {
+  StudioPageContext,
+  CapturedRequest,
+  RelatedVideoMutationMeta,
+  ReplayResult,
+  MutationItemProgress,
+  MutationJobSummary,
+  MutationExecutePayload,
+  BRIDGE_EVENTS
+} from '../types';
+import { normalizeYouTubeVideoId } from '../common/youtube';
+import { isShortsListView } from './detector';
 
 export class DevIndicatorUI {
   private hostElement: HTMLElement | null = null;
@@ -6,12 +17,35 @@ export class DevIndicatorUI {
   private currentContext: StudioPageContext | null = null;
   private navCount = 0;
   private isMinimized = false;
+
+  // Network Inspector State
   private isCaptureActive = false;
   private capturedRequests: CapturedRequest[] = [];
   private activeMutation: RelatedVideoMutationMeta | null = null;
   private replayState: 'idle' | 'confirming' | 'replaying' | 'done' = 'idle';
   private replayResult: ReplayResult | null = null;
-  private activeTab: 'studio' | 'inspector' = 'studio';
+
+  // Shorts List View State
+  private selectedShortIds: string[] = [];
+  private relatedVideoInput = '';
+  private normalizedTargetId: string | null = null;
+  private inputValidationError: string | null = null;
+  private hasTemplate = false;
+  private hasSingleTestSucceeded = false;
+  private isGateBypassed = false;
+
+  // Single test state
+  private singleTestState: 'idle' | 'confirming' | 'running' | 'done' = 'idle';
+  private singleTestResult: MutationItemProgress | null = null;
+
+  // Bulk execution state
+  private bulkJobState: 'idle' | 'running' | 'cancelled' | 'done' = 'idle';
+  private bulkItemsProgress: Map<string, MutationItemProgress> = new Map();
+  private bulkSummary: MutationJobSummary | null = null;
+  private currentJobId: string | null = null;
+
+  // Active tab: 'shorts' (default on Shorts list), 'inspector', 'studio'
+  private activeTab: 'shorts' | 'inspector' | 'studio' = 'shorts';
 
   public mount(initialContext: StudioPageContext): void {
     if (this.hostElement) return;
@@ -23,29 +57,77 @@ export class DevIndicatorUI {
 
     document.body.appendChild(this.hostElement);
 
-    // Listen to sanitized capture events from MAIN world
+    // Initial tab selection
+    if (isShortsListView()) {
+      this.activeTab = 'shorts';
+    } else {
+      this.activeTab = 'inspector';
+    }
+
+    // Check template status in MAIN world
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.TEMPLATE_STATUS_REQUEST));
+
+    // Listen to bridge events
+    document.addEventListener(BRIDGE_EVENTS.TEMPLATE_STATUS_RESPONSE, ((event: CustomEvent<{ hasTemplate: boolean }>) => {
+      if (event.detail) {
+        this.hasTemplate = event.detail.hasTemplate;
+        this.render();
+      }
+    }) as EventListener);
+
     document.addEventListener(BRIDGE_EVENTS.CAPTURE, ((event: CustomEvent<CapturedRequest>) => {
       if (event.detail) {
         this.addCapturedRequest(event.detail);
       }
     }) as EventListener);
 
-    // Listen to Related Video mutation detection events
     document.addEventListener(BRIDGE_EVENTS.MUTATION_DETECTED, ((event: CustomEvent<RelatedVideoMutationMeta>) => {
       if (event.detail) {
         this.activeMutation = event.detail;
+        this.hasTemplate = true;
         this.replayState = 'idle';
         this.replayResult = null;
-        this.activeTab = 'inspector';
         this.render();
       }
     }) as EventListener);
 
-    // Listen to Replay result events
     document.addEventListener(BRIDGE_EVENTS.REPLAY_RESPONSE, ((event: CustomEvent<ReplayResult>) => {
       if (event.detail) {
         this.replayResult = event.detail;
         this.replayState = 'done';
+        if (event.detail.success) {
+          this.hasSingleTestSucceeded = true;
+        }
+        this.render();
+      }
+    }) as EventListener);
+
+    // Bulk / Single execution progress
+    document.addEventListener(BRIDGE_EVENTS.MUTATION_PROGRESS, ((event: CustomEvent<MutationItemProgress>) => {
+      if (event.detail) {
+        const item = event.detail;
+        if (this.singleTestState === 'running') {
+          if (item.status === 'success' || item.status === 'failed') {
+            this.singleTestResult = item;
+            this.singleTestState = 'done';
+            if (item.status === 'success') {
+              this.hasSingleTestSucceeded = true;
+            }
+          }
+        } else if (this.bulkJobState === 'running') {
+          this.bulkItemsProgress.set(item.sourceShortId, item);
+        }
+        this.render();
+      }
+    }) as EventListener);
+
+    document.addEventListener(BRIDGE_EVENTS.MUTATION_COMPLETE, ((event: CustomEvent<MutationJobSummary>) => {
+      if (event.detail) {
+        this.bulkSummary = event.detail;
+        this.bulkJobState = event.detail.isCancelled ? 'cancelled' : 'done';
+        if (event.detail.succeeded > 0) {
+          this.hasSingleTestSucceeded = true;
+        }
         this.render();
       }
     }) as EventListener);
@@ -56,6 +138,24 @@ export class DevIndicatorUI {
   public updateContext(context: StudioPageContext): void {
     this.currentContext = context;
     this.navCount++;
+    if (isShortsListView() && this.activeTab === 'studio') {
+      this.activeTab = 'shorts';
+    }
+    this.render();
+  }
+
+  public updateSelection(selectedIds: string[]): void {
+    this.selectedShortIds = selectedIds;
+    // Reset test / job state when selection changes
+    if (this.singleTestState === 'done') {
+      this.singleTestState = 'idle';
+      this.singleTestResult = null;
+    }
+    if (this.bulkJobState === 'done' || this.bulkJobState === 'cancelled') {
+      this.bulkJobState = 'idle';
+      this.bulkSummary = null;
+      this.bulkItemsProgress.clear();
+    }
     this.render();
   }
 
@@ -64,10 +164,75 @@ export class DevIndicatorUI {
     if (this.capturedRequests.length > 50) {
       this.capturedRequests.pop();
     }
-    if (this.isCaptureActive) {
-      this.activeTab = 'inspector';
+    this.render();
+  }
+
+  private setTargetVideoInput(val: string): void {
+    this.relatedVideoInput = val;
+    if (!val.trim()) {
+      this.normalizedTargetId = null;
+      this.inputValidationError = null;
+    } else {
+      const res = normalizeYouTubeVideoId(val);
+      if (res.isValid && res.videoId) {
+        this.normalizedTargetId = res.videoId;
+        this.inputValidationError = null;
+      } else {
+        this.normalizedTargetId = null;
+        this.inputValidationError = res.error || 'Invalid YouTube URL or ID';
+      }
     }
     this.render();
+  }
+
+  private executeSingleShortTest(): void {
+    if (!this.normalizedTargetId || this.selectedShortIds.length === 0) return;
+
+    const sourceShortId = this.selectedShortIds[0];
+    this.singleTestState = 'running';
+    this.singleTestResult = null;
+    this.render();
+
+    const payload: MutationExecutePayload = {
+      jobId: `single_${Date.now()}`,
+      sourceShortIds: [sourceShortId],
+      targetVideoId: this.normalizedTargetId,
+      delayMs: 0
+    };
+
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.EXECUTE_MUTATION, { detail: payload }));
+  }
+
+  private executeBulkAssignment(): void {
+    if (!this.normalizedTargetId || this.selectedShortIds.length === 0) return;
+
+    this.bulkJobState = 'running';
+    this.bulkSummary = null;
+    this.bulkItemsProgress.clear();
+    this.currentJobId = `bulk_${Date.now()}`;
+
+    // Initialize queued items
+    for (const id of this.selectedShortIds) {
+      this.bulkItemsProgress.set(id, {
+        sourceShortId: id,
+        targetVideoId: this.normalizedTargetId,
+        status: 'queued'
+      });
+    }
+    this.render();
+
+    const payload: MutationExecutePayload = {
+      jobId: this.currentJobId,
+      sourceShortIds: this.selectedShortIds,
+      targetVideoId: this.normalizedTargetId,
+      delayMs: 800
+    };
+
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.EXECUTE_MUTATION, { detail: payload }));
+  }
+
+  private cancelBulkJob(): void {
+    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.CANCEL_MUTATION));
   }
 
   private toggleCapture(): void {
@@ -78,17 +243,6 @@ export class DevIndicatorUI {
       })
     );
     this.render();
-  }
-
-  private clearCaptures(): void {
-    this.capturedRequests = [];
-    this.render();
-  }
-
-  private triggerReplay(): void {
-    this.replayState = 'replaying';
-    this.render();
-    document.dispatchEvent(new CustomEvent(BRIDGE_EVENTS.REPLAY_REQUEST));
   }
 
   private toggleMinimize(): void {
@@ -112,9 +266,8 @@ export class DevIndicatorUI {
   private render(): void {
     if (!this.shadowRoot || !this.currentContext) return;
 
-    const readableType = this.currentContext.pageType
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, (c) => c.toUpperCase());
+    const onShortsList = isShortsListView();
+    const selectedCount = this.selectedShortIds.length;
 
     const css = `
       :host {
@@ -126,22 +279,22 @@ export class DevIndicatorUI {
         font-size: 12px;
         line-height: 1.4;
       }
-      .badge-container {
+      .panel-container {
         background: #18181b;
         color: #f4f4f5;
         border: 1px solid #3f3f46;
         border-radius: 10px;
         box-shadow: 0 14px 30px -4px rgba(0, 0, 0, 0.7), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
         padding: 12px 14px;
-        width: 400px;
-        max-width: 90vw;
-        max-height: 85vh;
+        width: 410px;
+        max-width: 92vw;
+        max-height: 88vh;
         display: flex;
         flex-direction: column;
         backdrop-filter: blur(8px);
         transition: all 0.2s ease-in-out;
       }
-      .badge-container.minimized {
+      .panel-container.minimized {
         width: auto;
         padding: 6px 12px;
         border-radius: 20px;
@@ -164,8 +317,8 @@ export class DevIndicatorUI {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background-color: ${this.isCaptureActive ? '#22c55e' : '#71717a'};
-        box-shadow: ${this.isCaptureActive ? '0 0 0 2px rgba(34, 197, 94, 0.3)' : 'none'};
+        background-color: ${onShortsList ? '#22c55e' : '#71717a'};
+        box-shadow: ${onShortsList ? '0 0 0 2px rgba(34, 197, 94, 0.3)' : 'none'};
       }
       .main-title {
         font-weight: 600;
@@ -212,7 +365,7 @@ export class DevIndicatorUI {
       }
       .tab-content {
         overflow-y: auto;
-        max-height: 540px;
+        max-height: 560px;
         display: flex;
         flex-direction: column;
         gap: 10px;
@@ -225,294 +378,173 @@ export class DevIndicatorUI {
         background: #3f3f46;
         border-radius: 4px;
       }
-      .detail-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        color: #a1a1aa;
-      }
-      .detail-val {
-        color: #e4e4e7;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        font-size: 11px;
-        background: #27272a;
-        padding: 2px 6px;
-        border-radius: 4px;
-        max-width: 220px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .highlight {
-        color: #38bdf8;
-      }
-      .inspector-control-box {
-        background: #27272a;
-        border: 1px solid #3f3f46;
-        border-radius: 6px;
-        padding: 8px 10px;
+
+      /* Form elements */
+      .form-group {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 4px;
       }
-      .control-row {
+      .form-label {
+        font-size: 11px;
+        color: #a1a1aa;
+        font-weight: 500;
         display: flex;
-        align-items: center;
         justify-content: space-between;
       }
-      .status-pill {
+      .input-text {
+        background: #09090b;
+        border: 1px solid #3f3f46;
+        color: #f4f4f5;
+        border-radius: 6px;
+        padding: 7px 10px;
+        font-size: 12px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.15s ease;
+      }
+      .input-text:focus {
+        border-color: #0284c7;
+      }
+      .input-valid {
+        border-color: #059669 !important;
+      }
+      .input-invalid {
+        border-color: #dc2626 !important;
+      }
+      .validation-msg {
+        font-size: 10px;
+        margin-top: 2px;
+      }
+      .validation-msg.valid {
+        color: #34d399;
+      }
+      .validation-msg.invalid {
+        color: #f87171;
+      }
+
+      /* Badges & Buttons */
+      .badge-pill {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
         padding: 2px 8px;
         border-radius: 12px;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 600;
-        background: ${this.isCaptureActive ? 'rgba(34, 197, 94, 0.15)' : 'rgba(113, 113, 122, 0.2)'};
-        color: ${this.isCaptureActive ? '#4ade80' : '#a1a1aa'};
       }
-      .action-btns {
-        display: flex;
-        gap: 6px;
+      .badge-green {
+        background: rgba(34, 197, 94, 0.15);
+        color: #4ade80;
+      }
+      .badge-amber {
+        background: rgba(245, 158, 11, 0.15);
+        color: #fbbf24;
+      }
+      .badge-blue {
+        background: rgba(2, 132, 199, 0.15);
+        color: #38bdf8;
       }
       .btn {
         border: none;
-        padding: 4px 10px;
-        border-radius: 5px;
+        padding: 6px 12px;
+        border-radius: 6px;
         font-size: 11px;
-        font-weight: 500;
+        font-weight: 600;
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
         transition: opacity 0.15s ease;
       }
       .btn:hover:not(:disabled) {
         opacity: 0.9;
       }
       .btn:disabled {
-        opacity: 0.5;
+        opacity: 0.45;
         cursor: not-allowed;
       }
       .btn-primary {
-        background: ${this.isCaptureActive ? '#ef4444' : '#0284c7'};
+        background: #0284c7;
         color: #ffffff;
       }
-      .btn-replay {
-        background: #2563eb;
+      .btn-success {
+        background: #059669;
         color: #ffffff;
-        font-weight: 600;
       }
-      .btn-cancel {
-        background: #4b5563;
-        color: #f3f4f6;
+      .btn-danger {
+        background: #dc2626;
+        color: #ffffff;
       }
       .btn-secondary {
-        background: #3f3f46;
+        background: #27272a;
         color: #e4e4e7;
+        border: 1px solid #3f3f46;
       }
 
-      /* Mutation Box Styles */
-      .mutation-box {
+      /* Card boxes */
+      .card-box {
+        background: #202023;
         border: 1px solid #3f3f46;
         border-radius: 6px;
         padding: 10px;
-        background: #1c1c20;
         display: flex;
         flex-direction: column;
         gap: 8px;
       }
-      .mutation-box.active {
-        border-color: #059669;
-        background: #06281e;
+      .card-box.highlight {
+        border-color: #0284c7;
       }
-      .mutation-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .mutation-title {
-        font-weight: 600;
-        font-size: 12px;
-        color: #fafafa;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .badge-captured {
-        font-size: 10px;
-        padding: 2px 6px;
-        border-radius: 10px;
-        background: rgba(16, 185, 129, 0.2);
-        color: #34d399;
-        font-weight: 600;
-      }
-      .badge-empty {
-        font-size: 10px;
-        padding: 2px 6px;
-        border-radius: 10px;
-        background: rgba(113, 113, 122, 0.2);
-        color: #a1a1aa;
-      }
-      .badge-exp {
-        font-size: 9px;
-        padding: 1px 4px;
-        border-radius: 3px;
-        background: #d97706;
-        color: #fff;
-        font-weight: 600;
-      }
-      .mutation-fields {
+
+      /* Progress table */
+      .progress-list {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        font-size: 11px;
+        max-height: 180px;
+        overflow-y: auto;
+        border: 1px solid #27272a;
+        border-radius: 4px;
+        padding: 6px;
+        background: #09090b;
       }
-      .field-row {
+      .progress-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-      }
-      .field-label {
-        color: #9ca3af;
-      }
-      .field-val {
-        color: #f3f4f6;
-      }
-      .field-val.mono {
-        font-family: ui-monospace, monospace;
         font-size: 11px;
-        background: #18181b;
-        padding: 2px 5px;
-        border-radius: 3px;
-      }
-      .confirm-box {
-        background: #1f2937;
-        border: 1px solid #374151;
-        border-radius: 5px;
-        padding: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-      }
-      .confirm-text {
-        font-size: 11px;
-        color: #f3f4f6;
-        line-height: 1.35;
-      }
-      .confirm-actions {
-        display: flex;
-        justify-content: flex-end;
-        gap: 6px;
-      }
-      .result-box {
-        border-radius: 5px;
-        padding: 8px;
-        font-size: 11px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      .result-box.success {
-        background: rgba(16, 185, 129, 0.15);
-        border: 1px solid #059669;
-        color: #34d399;
-      }
-      .result-box.failed {
-        background: rgba(239, 68, 68, 0.15);
-        border: 1px solid #dc2626;
-        color: #f87171;
-      }
-      .result-header {
-        font-weight: 700;
-        display: flex;
-        justify-content: space-between;
-      }
-      .card {
-        background: #202023;
-        border: 1px solid #3f3f46;
-        border-radius: 6px;
-        padding: 8px 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-      }
-      .card-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .method-tag {
-        font-family: ui-monospace, monospace;
-        font-weight: 700;
-        font-size: 10px;
         padding: 2px 4px;
         border-radius: 3px;
-        background: #0369a1;
-        color: #f0f9ff;
       }
-      .status-tag {
-        font-family: ui-monospace, monospace;
-        font-size: 10px;
-        padding: 2px 4px;
-        border-radius: 3px;
-        font-weight: 600;
-      }
-      .status-2xx {
-        background: rgba(34, 197, 94, 0.2);
+      .progress-row.success {
         color: #4ade80;
       }
-      .status-err {
-        background: rgba(239, 68, 68, 0.2);
+      .progress-row.failed {
         color: #f87171;
       }
-      .card-path {
-        font-family: ui-monospace, monospace;
-        font-size: 11px;
+      .progress-row.running {
         color: #38bdf8;
-        word-break: break-all;
+        background: rgba(56, 189, 248, 0.1);
       }
-      .card-meta {
-        font-size: 10px;
+      .progress-row.queued {
         color: #71717a;
-        display: flex;
-        justify-content: space-between;
       }
-      .code-container {
-        position: relative;
-        margin-top: 4px;
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       }
       .code-box {
         background: #09090b;
         border: 1px solid #27272a;
         border-radius: 4px;
         padding: 6px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-family: ui-monospace, monospace;
         font-size: 10px;
         color: #a1a1aa;
-        max-height: 120px;
+        max-height: 110px;
         overflow-y: auto;
         white-space: pre-wrap;
-        word-break: break-all;
         margin: 0;
-      }
-      .copy-btn {
-        position: absolute;
-        top: 4px;
-        right: 4px;
-        background: #27272a;
-        border: 1px solid #3f3f46;
-        color: #e4e4e7;
-        font-size: 9px;
-        padding: 2px 5px;
-        border-radius: 3px;
-        cursor: pointer;
-      }
-      .copy-btn:hover {
-        background: #3f3f46;
-      }
-      .empty-state {
-        text-align: center;
-        padding: 14px 8px;
-        color: #71717a;
-        font-size: 11px;
       }
       .footer-note {
         margin-top: 8px;
@@ -528,10 +560,10 @@ export class DevIndicatorUI {
     if (this.isMinimized) {
       this.shadowRoot.innerHTML = `
         <style>${css}</style>
-        <div class="badge-container minimized" id="expand-trigger">
+        <div class="panel-container minimized" id="expand-trigger">
           <div class="title-group">
             <span class="pulse-dot"></span>
-            <span class="main-title">ShortLinker POC ${this.activeMutation ? '(Mutation Ready)' : ''}</span>
+            <span class="main-title">ShortLinker (${selectedCount} selected)</span>
           </div>
         </div>
       `;
@@ -541,245 +573,442 @@ export class DevIndicatorUI {
       return;
     }
 
-    const studioTabContent = `
-      <div class="detail-row">
-        <span>Page View:</span>
-        <span class="detail-val highlight">${readableType}</span>
-      </div>
-      ${
-        this.currentContext.videoId
-          ? `
-      <div class="detail-row">
-        <span>Video ID:</span>
-        <span class="detail-val">${this.currentContext.videoId}</span>
-      </div>`
-          : ''
-      }
-      ${
-        this.currentContext.channelId
-          ? `
-      <div class="detail-row">
-        <span>Channel ID:</span>
-        <span class="detail-val">${this.currentContext.channelId}</span>
-      </div>`
-          : ''
-      }
-      <div class="detail-row">
-        <span>SPA Navigations:</span>
-        <span class="detail-val">${this.navCount}</span>
-      </div>
-      <div class="detail-row">
-        <span>Mutation Captured:</span>
-        <span class="detail-val ${this.activeMutation ? 'highlight' : ''}">${this.activeMutation ? 'Yes (Ready)' : 'None'}</span>
-      </div>
-      <div style="margin-top: 6px; font-size: 11px; color: #a1a1aa; line-height: 1.4;">
-        Switch to the <b>Network Inspector</b> tab to observe or test replaying the Related Video mutation.
-      </div>
-    `;
+    // -------------------------------------------------------------
+    // SHORTS LIST VIEW CONTENT
+    // -------------------------------------------------------------
+    let shortsTabContent = '';
 
-    // Render Mutation Section
-    let mutationSectionHtml = '';
-    if (!this.activeMutation) {
-      mutationSectionHtml = `
-        <div class="mutation-box">
-          <div class="mutation-header">
-            <span class="mutation-title">Related Video Mutation</span>
-            <span class="badge-empty">None captured</span>
+    if (!onShortsList) {
+      shortsTabContent = `
+        <div class="card-box" style="text-align: center; padding: 18px 10px;">
+          <div style="font-weight: 600; font-size: 12px; color: #f4f4f5; margin-bottom: 4px;">
+            Shorts List View Standby
           </div>
-          <div style="font-size: 11px; color: #71717a;">
-            No Related Video mutation captured yet.<br>
-            Change and save a Related Video on any Short to capture.
+          <div style="font-size: 11px; color: #a1a1aa; line-height: 1.4;">
+            Navigate to <b>Content &rarr; Shorts</b> in YouTube Studio to use bulk selection and link Related Videos directly from the list.
           </div>
         </div>
       `;
     } else {
-      let replayControlsHtml = '';
-      if (this.replayState === 'idle') {
-        replayControlsHtml = `
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
-            <span class="badge-exp">Experimental</span>
-            <button class="btn btn-replay" id="btn-show-confirm">Test Replay</button>
+      // Template warning if not captured yet
+      const templateNoticeHtml = !this.hasTemplate
+        ? `
+        <div class="card-box" style="border-color: #d97706; background: rgba(217, 119, 6, 0.1);">
+          <div style="font-weight: 600; color: #fbbf24; font-size: 11px;">
+            Session Template Required
           </div>
-        `;
-      } else if (this.replayState === 'confirming') {
-        replayControlsHtml = `
-          <div class="confirm-box">
-            <div class="confirm-text">
-              This will replay the last captured Related Video update for the same Short and Related Video. Continue?
-            </div>
-            <div class="confirm-actions">
-              <button class="btn btn-cancel" id="btn-cancel-confirm">Cancel</button>
-              <button class="btn btn-replay" id="btn-exec-replay">Replay</button>
-            </div>
+          <div style="font-size: 10px; color: #d1d5db; line-height: 1.35;">
+            To link videos through your session, YouTube requires an active mutation template.
+            Please save any Related Video manually once in Studio this session to capture it.
           </div>
-        `;
-      } else if (this.replayState === 'replaying') {
-        replayControlsHtml = `
-          <div style="display: flex; justify-content: center; align-items: center; padding: 6px; color: #60a5fa; font-size: 11px; gap: 6px;">
-            <span class="pulse-dot"></span>
-            Replaying mutation in browser session...
-          </div>
-        `;
-      } else if (this.replayState === 'done' && this.replayResult) {
-        const isSuccess = this.replayResult.success;
-        replayControlsHtml = `
-          <div class="result-box ${isSuccess ? 'success' : 'failed'}">
-            <div class="result-header">
-              <span>Replay Result</span>
-              <span>${isSuccess ? 'Success — HTTP 200' : `Failed — HTTP ${this.replayResult.httpStatus || 'ERR'}`}</span>
-            </div>
-            <div>
-              ${
-                isSuccess
-                  ? `Verified: Short [${this.replayResult.sourceVideoId}] linked to [${this.replayResult.targetVideoId}] (${this.replayResult.durationMs}ms)`
-                  : `Status: ${this.replayResult.statusText} ${
-                      this.replayResult.attestationRejected ? '<br><b>Notice:</b> Attestation or challenge rejected.' : ''
-                    }`
-              }
-            </div>
-            <div class="code-container" style="margin-top: 4px;">
-              <pre class="code-box">${escapeHtml(this.replayResult.sanitizedResponseSnippet)}</pre>
-            </div>
-            <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
-              <button class="btn btn-secondary" id="btn-dismiss-replay">Dismiss</button>
-              <button class="btn btn-replay" id="btn-show-confirm">Test Replay Again</button>
-            </div>
-          </div>
-        `;
-      }
+        </div>`
+        : '';
 
-      mutationSectionHtml = `
-        <div class="mutation-box active">
-          <div class="mutation-header">
-            <span class="mutation-title">Related Video Mutation</span>
-            <span class="badge-captured">Captured (HTTP ${this.activeMutation.httpStatus ?? 200})</span>
+      // Target Video Input Section
+      const targetInputSectionHtml = `
+        <div class="form-group">
+          <div class="form-label">
+            <span>Target Related Video:</span>
+            ${
+              this.normalizedTargetId
+                ? `<span class="badge-pill badge-green">ID: ${this.normalizedTargetId}</span>`
+                : ''
+            }
           </div>
-          <div class="mutation-fields">
-            <div class="field-row">
-              <span class="field-label">Source Short:</span>
-              <span class="field-val mono">${this.activeMutation.sourceVideoId}</span>
-            </div>
-            <div class="field-row">
-              <span class="field-label">Related Video:</span>
-              <span class="field-val mono highlight">${this.activeMutation.targetVideoId}</span>
-            </div>
-            <div class="field-row">
-              <span class="field-label">Time:</span>
-              <span class="field-val">${this.activeMutation.timestamp}</span>
-            </div>
-          </div>
-          ${replayControlsHtml}
+          <input
+            type="text"
+            id="target-video-input"
+            class="input-text ${
+              this.normalizedTargetId ? 'input-valid' : this.inputValidationError ? 'input-invalid' : ''
+            }"
+            placeholder="Paste YouTube watch URL, Shorts URL, or 11-char ID"
+            value="${escapeHtml(this.relatedVideoInput)}"
+            ${this.bulkJobState === 'running' || this.singleTestState === 'running' ? 'disabled' : ''}
+          />
+          ${
+            this.normalizedTargetId
+              ? `<div class="validation-msg valid">✓ Valid YouTube Video (${this.normalizedTargetId})</div>`
+              : this.inputValidationError
+              ? `<div class="validation-msg invalid">✗ ${escapeHtml(this.inputValidationError)}</div>`
+              : '<div class="validation-msg" style="color: #71717a;">Accepts watch URLs, youtu.be, shorts URLs, or raw 11-char IDs.</div>'
+          }
         </div>
       `;
-    }
 
-    const cardsHtml =
-      this.capturedRequests.length === 0
-        ? `<div class="empty-state">${
-            this.isCaptureActive
-              ? 'Listening for YouTube Studio metadata requests...<br>Save a Related Video in Studio to capture.'
-              : 'Capture is currently OFF.<br>Click "Start Capture" to record candidate requests.'
-          }</div>`
-        : this.capturedRequests
-            .map((req, idx) => {
-              const statusClass =
-                req.status && req.status >= 200 && req.status < 300 ? 'status-2xx' : 'status-err';
-              const bodyStr =
-                req.bodyType === 'json'
-                  ? JSON.stringify(req.sanitizedBody, null, 2)
-                  : typeof req.sanitizedBody === 'string'
-                  ? req.sanitizedBody
-                  : JSON.stringify(req.sanitizedBody);
+      // Selection Summary Bar
+      const selectionBarHtml = `
+        <div class="card-box">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 600; font-size: 12px; color: #f4f4f5;">Selected Shorts:</span>
+            <span class="badge-pill ${selectedCount > 0 ? 'badge-blue' : 'badge-amber'}" style="font-size: 11px;">
+              ${selectedCount} Short${selectedCount === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div style="font-size: 10px; color: #a1a1aa;">
+            ${
+              selectedCount === 0
+                ? 'Select Shorts using the row checkboxes in YouTube Studio.'
+                : selectedCount === 1
+                ? `1 Short selected (${this.selectedShortIds[0]}). Ready for test.`
+                : `${selectedCount} Shorts selected from list.`
+            }
+          </div>
+        </div>
+      `;
 
-              return `
-          <div class="card">
-            <div class="card-header">
-              <div style="display: flex; gap: 6px; align-items: center;">
-                <span class="method-tag">${req.method}</span>
-                <span class="card-path" title="${req.url}">${req.pathname}</span>
-              </div>
-              <span class="status-tag ${statusClass}">${req.status ?? 'Pending'}</span>
-            </div>
-            <div class="card-meta">
-              <span>${req.timestamp} (${req.durationMs ?? 0}ms &bull; ${req.source.toUpperCase()})</span>
-              <span>Type: ${req.contentType.split(';')[0] || 'unspecified'}</span>
-            </div>
-            <div class="code-container">
-              <button class="copy-btn" data-copy-idx="${idx}">Copy JSON</button>
-              <pre class="code-box">${escapeHtml(bodyStr)}</pre>
-            </div>
+      // Execution Section: Single Short vs Multi-Short
+      let executionSectionHtml = '';
+
+      if (selectedCount === 0) {
+        executionSectionHtml = `
+          <div style="text-align: center; color: #71717a; font-size: 11px; padding: 10px 0;">
+            Check one or more rows in YouTube's table to enable actions.
           </div>
         `;
+      } else if (selectedCount === 1) {
+        // EXACT SINGLE SHORT TEST PATH
+        const singleShortId = this.selectedShortIds[0];
+
+        if (this.singleTestState === 'idle') {
+          executionSectionHtml = `
+            <div class="card-box highlight">
+              <div style="font-weight: 600; font-size: 11px; color: #38bdf8;">
+                Test One Selected Short
+              </div>
+              <div style="font-size: 11px; color: #d1d5db;">
+                Target Short: <span class="mono">${singleShortId}</span>
+              </div>
+              <button
+                class="btn btn-primary"
+                id="btn-single-test-confirm"
+                ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
+              >
+                Test Update on this Short
+              </button>
+            </div>
+          `;
+        } else if (this.singleTestState === 'confirming') {
+          executionSectionHtml = `
+            <div class="card-box" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.08);">
+              <div style="font-weight: 600; font-size: 11px; color: #fbbf24;">
+                Confirm Single Test
+              </div>
+              <div style="font-size: 11px; color: #f3f4f6; line-height: 1.4;">
+                You are about to change:<br>
+                Short: <span class="mono">${singleShortId}</span><br>
+                Related Video: <span class="mono highlight">${this.normalizedTargetId}</span>
+              </div>
+              <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
+                <button class="btn btn-secondary" id="btn-single-cancel">Cancel</button>
+                <button class="btn btn-success" id="btn-single-execute">Test Update</button>
+              </div>
+            </div>
+          `;
+        } else if (this.singleTestState === 'running') {
+          executionSectionHtml = `
+            <div class="card-box" style="text-align: center; padding: 14px;">
+              <span class="badge-pill badge-blue" style="margin-bottom: 6px;">Updating Short...</span>
+              <div class="mono" style="font-size: 11px; color: #38bdf8;">${singleShortId} &rarr; ${this.normalizedTargetId}</div>
+            </div>
+          `;
+        } else if (this.singleTestState === 'done' && this.singleTestResult) {
+          const isSuccess = this.singleTestResult.status === 'success';
+          executionSectionHtml = `
+            <div class="card-box" style="border-color: ${isSuccess ? '#059669' : '#dc2626'}; background: ${
+            isSuccess ? 'rgba(5, 150, 105, 0.1)' : 'rgba(220, 38, 38, 0.1)'
+          };">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 700; font-size: 11px; color: ${isSuccess ? '#4ade80' : '#f87171'};">
+                  ${isSuccess ? 'Success — HTTP 200' : `Failed — HTTP ${this.singleTestResult.httpStatus || 'ERR'}`}
+                </span>
+                <span class="badge-pill ${isSuccess ? 'badge-green' : 'badge-amber'}">
+                  ${this.singleTestResult.durationMs ?? 0}ms
+                </span>
+              </div>
+              <div style="font-size: 11px; color: #f3f4f6;">
+                Short <span class="mono">${singleShortId}</span> &rarr; Target <span class="mono">${this.normalizedTargetId}</span>
+              </div>
+              ${
+                this.singleTestResult.error
+                  ? `<div style="font-size: 10px; color: #fca5a5;"><b>Reason:</b> ${escapeHtml(
+                      this.singleTestResult.error
+                    )}</div>`
+                  : ''
+              }
+              ${
+                this.singleTestResult.attestationRejected
+                  ? `<div style="font-size: 10px; color: #fbbf24;"><b>Notice:</b> Attestation rejected by YouTube Studio.</div>`
+                  : ''
+              }
+              <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
+                <button class="btn btn-secondary" id="btn-single-test-confirm">Run Again</button>
+              </div>
+            </div>
+          `;
+        }
+      } else {
+        // MULTI-SHORT BULK PATH (Gated until single test succeeds or user intentionally proceeds)
+        const isGated = !this.hasSingleTestSucceeded && !this.isGateBypassed;
+
+        if (this.bulkJobState === 'idle') {
+          if (isGated) {
+            executionSectionHtml = `
+              <div class="card-box" style="border-color: #d97706; background: rgba(217, 119, 6, 0.08);">
+                <div style="font-weight: 600; color: #fbbf24; font-size: 11px;">
+                  Safety Gate: Single Short Verification
+                </div>
+                <div style="font-size: 11px; color: #d1d5db; line-height: 1.35;">
+                  Please select <b>1 Short</b> and run a single test first to verify session attestation, before running multi-video updates.
+                </div>
+                <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+                  <button class="btn btn-secondary" id="btn-bypass-gate" style="font-size: 10px;">
+                    Proceed with Bulk Anyway
+                  </button>
+                </div>
+              </div>
+            `;
+          } else {
+            executionSectionHtml = `
+              <div class="card-box highlight">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-weight: 600; font-size: 12px; color: #f4f4f5;">Bulk Assignment</span>
+                  <span class="badge-pill badge-green">Ready</span>
+                </div>
+                <div style="font-size: 11px; color: #a1a1aa;">
+                  Assign Related Video <span class="mono highlight">${this.normalizedTargetId || '...'}</span> to all <b>${selectedCount}</b> selected Shorts sequentially.
+                </div>
+                <button
+                  class="btn btn-primary"
+                  id="btn-start-bulk"
+                  ${!this.normalizedTargetId || !this.hasTemplate ? 'disabled' : ''}
+                >
+                  Assign to ${selectedCount} Shorts
+                </button>
+              </div>
+            `;
+          }
+        } else if (this.bulkJobState === 'running') {
+          const completedCount = Array.from(this.bulkItemsProgress.values()).filter(
+            (it) => it.status === 'success' || it.status === 'failed' || it.status === 'cancelled'
+          ).length;
+
+          const progressRowsHtml = Array.from(this.bulkItemsProgress.values())
+            .map((it) => {
+              const icon =
+                it.status === 'success'
+                  ? '✓'
+                  : it.status === 'failed'
+                  ? '✗'
+                  : it.status === 'running'
+                  ? '⟳'
+                  : '○';
+              return `
+              <div class="progress-row ${it.status}">
+                <span>${icon} <span class="mono">${it.sourceShortId}</span></span>
+                <span>${it.status.toUpperCase()} ${it.httpStatus ? `(${it.httpStatus})` : ''}</span>
+              </div>
+            `;
             })
             .join('');
 
+          executionSectionHtml = `
+            <div class="card-box">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 600; font-size: 11px; color: #38bdf8;">
+                  Processing: ${completedCount} / ${selectedCount}
+                </span>
+                <button class="btn btn-danger" id="btn-cancel-bulk" style="padding: 2px 8px; font-size: 10px;">
+                  Stop / Cancel
+                </button>
+              </div>
+              <div class="progress-list">
+                ${progressRowsHtml}
+              </div>
+            </div>
+          `;
+        } else if (this.bulkJobState === 'done' || this.bulkJobState === 'cancelled') {
+          const summary = this.bulkSummary;
+          const progressRowsHtml = Array.from(this.bulkItemsProgress.values())
+            .map((it) => {
+              const icon =
+                it.status === 'success'
+                  ? '✓'
+                  : it.status === 'failed'
+                  ? '✗'
+                  : '○';
+              return `
+              <div class="progress-row ${it.status}">
+                <span>${icon} <span class="mono">${it.sourceShortId}</span></span>
+                <span>${it.status.toUpperCase()} ${it.error ? `- ${escapeHtml(it.error)}` : ''}</span>
+              </div>
+            `;
+            })
+            .join('');
+
+          executionSectionHtml = `
+            <div class="card-box" style="border-color: ${
+              summary && summary.failed === 0 ? '#059669' : '#f59e0b'
+            };">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 700; font-size: 12px; color: #f4f4f5;">
+                  ${this.bulkJobState === 'cancelled' ? 'Operation Cancelled' : 'Bulk Update Complete'}
+                </span>
+                <span class="badge-pill ${summary && summary.failed === 0 ? 'badge-green' : 'badge-amber'}">
+                  ${summary ? `${summary.succeeded} / ${summary.total} Succeeded` : ''}
+                </span>
+              </div>
+              <div class="progress-list">
+                ${progressRowsHtml}
+              </div>
+              <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+                <button class="btn btn-secondary" id="btn-reset-bulk">Close Summary</button>
+              </div>
+            </div>
+          `;
+        }
+      }
+
+      shortsTabContent = `
+        ${templateNoticeHtml}
+        ${targetInputSectionHtml}
+        ${selectionBarHtml}
+        ${executionSectionHtml}
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // NETWORK INSPECTOR CONTENT (Preserved for reverse-engineering)
+    // -------------------------------------------------------------
     const inspectorTabContent = `
-      <div class="inspector-control-box">
-        <div class="control-row">
-          <div class="status-pill">
-            <span class="pulse-dot"></span>
-            Status: ${this.isCaptureActive ? 'ON' : 'OFF'}
-          </div>
-          <div class="action-btns">
-            <button class="btn btn-primary" id="toggle-capture-btn">
-              ${this.isCaptureActive ? 'Stop Capture' : 'Start Capture'}
-            </button>
-            <button class="btn btn-secondary" id="clear-captures-btn" ${
-              this.capturedRequests.length === 0 ? 'disabled' : ''
-            }>
-              Clear
-            </button>
-          </div>
-        </div>
-        <div class="detail-row" style="font-size: 11px;">
-          <span>Captured Candidates:</span>
-          <span style="font-weight: 600; color: #f4f4f5;">${this.capturedRequests.length}</span>
+      <div class="card-box" style="padding: 8px 10px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="badge-pill ${this.isCaptureActive ? 'badge-green' : 'badge-amber'}">
+            Capture: ${this.isCaptureActive ? 'ON' : 'OFF'}
+          </span>
+          <button class="btn btn-primary" id="toggle-capture-btn" style="padding: 3px 8px; font-size: 10px;">
+            ${this.isCaptureActive ? 'Stop Capture' : 'Start Capture'}
+          </button>
         </div>
       </div>
-
-      ${mutationSectionHtml}
-
-      <div style="display: flex; flex-direction: column; gap: 8px;">
-        ${cardsHtml}
+      <div style="font-size: 11px; color: #a1a1aa;">
+        ${this.capturedRequests.length} candidate request(s) captured in memory.
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${
+          this.capturedRequests.length === 0
+            ? '<div style="text-align: center; color: #71717a; font-size: 11px; padding: 12px 0;">No candidate requests captured yet.</div>'
+            : this.capturedRequests
+                .map(
+                  (req, idx) => `
+          <div class="card-box" style="padding: 8px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px;">
+              <span class="mono" style="color: #38bdf8;">[${req.method}] ${req.pathname}</span>
+              <span class="badge-pill badge-green">${req.status ?? '200'}</span>
+            </div>
+            <pre class="code-box">${escapeHtml(
+              typeof req.sanitizedBody === 'object'
+                ? JSON.stringify(req.sanitizedBody, null, 2)
+                : String(req.sanitizedBody)
+            )}</pre>
+            <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+              <button class="btn btn-secondary copy-btn" data-copy-idx="${idx}" style="font-size: 9px; padding: 2px 6px;">
+                Copy JSON
+              </button>
+            </div>
+          </div>
+        `
+                )
+                .join('')
+        }
       </div>
     `;
 
+    // -------------------------------------------------------------
+    // STUDIO CONTEXT CONTENT
+    // -------------------------------------------------------------
+    const readableType = this.currentContext.pageType
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+
+    const studioTabContent = `
+      <div class="card-box">
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: #a1a1aa;">Page View:</span>
+          <span class="mono" style="color: #38bdf8;">${readableType}</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: #a1a1aa;">Shorts List Detected:</span>
+          <span class="badge-pill ${onShortsList ? 'badge-green' : 'badge-amber'}">${onShortsList ? 'Yes' : 'No'}</span>
+        </div>
+        ${
+          this.currentContext.channelId
+            ? `<div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: #a1a1aa;">Channel ID:</span>
+          <span class="mono">${this.currentContext.channelId}</span>
+        </div>`
+            : ''
+        }
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: #a1a1aa;">SPA Navigations:</span>
+          <span class="mono">${this.navCount}</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: #a1a1aa;">Template in Memory:</span>
+          <span class="badge-pill ${this.hasTemplate ? 'badge-green' : 'badge-amber'}">${this.hasTemplate ? 'Active' : 'None'}</span>
+        </div>
+      </div>
+    `;
+
+    // Full Render
     this.shadowRoot.innerHTML = `
       <style>${css}</style>
-      <div class="badge-container">
+      <div class="panel-container">
         <div class="header-row">
           <div class="title-group">
             <span class="pulse-dot"></span>
-            <span class="main-title">ShortLinker POC — YouTube Studio</span>
+            <span class="main-title">ShortLinker &bull; Shorts Manager</span>
           </div>
           <button class="minimize-btn" id="min-btn" title="Minimize indicator">_</button>
         </div>
 
         <div class="tab-bar">
-          <button class="tab-btn ${this.activeTab === 'studio' ? 'active' : ''}" id="tab-studio">Studio Context</button>
+          <button class="tab-btn ${this.activeTab === 'shorts' ? 'active' : ''}" id="tab-shorts">
+            Shorts Linker ${selectedCount > 0 ? `(${selectedCount})` : ''}
+          </button>
           <button class="tab-btn ${this.activeTab === 'inspector' ? 'active' : ''}" id="tab-inspector">
-            Network Inspector ${this.capturedRequests.length > 0 ? `(${this.capturedRequests.length})` : ''}
+            Network Inspector
+          </button>
+          <button class="tab-btn ${this.activeTab === 'studio' ? 'active' : ''}" id="tab-studio">
+            Context
           </button>
         </div>
 
         <div class="tab-content">
-          ${this.activeTab === 'studio' ? studioTabContent : inspectorTabContent}
+          ${
+            this.activeTab === 'shorts'
+              ? shortsTabContent
+              : this.activeTab === 'inspector'
+              ? inspectorTabContent
+              : studioTabContent
+          }
         </div>
 
         <div class="footer-note">
-          <span>In-memory only &bull; Credentials Redacted</span>
-          <span>Read-only POC</span>
+          <span>Local session &bull; Zero credentials stored</span>
+          <span>Open Source</span>
         </div>
       </div>
     `;
 
-    // Event Bindings
+    // -------------------------------------------------------------
+    // EVENT BINDINGS
+    // -------------------------------------------------------------
     this.shadowRoot.getElementById('min-btn')?.addEventListener('click', () => {
       this.toggleMinimize();
     });
 
-    this.shadowRoot.getElementById('tab-studio')?.addEventListener('click', () => {
-      this.activeTab = 'studio';
+    this.shadowRoot.getElementById('tab-shorts')?.addEventListener('click', () => {
+      this.activeTab = 'shorts';
       this.render();
     });
 
@@ -788,51 +1017,64 @@ export class DevIndicatorUI {
       this.render();
     });
 
+    this.shadowRoot.getElementById('tab-studio')?.addEventListener('click', () => {
+      this.activeTab = 'studio';
+      this.render();
+    });
+
+    // Input binding
+    const inputEl = this.shadowRoot.getElementById('target-video-input') as HTMLInputElement | null;
+    inputEl?.addEventListener('input', (e) => {
+      this.setTargetVideoInput((e.target as HTMLInputElement).value);
+    });
+
+    // Single Short test bindings
+    this.shadowRoot.getElementById('btn-single-test-confirm')?.addEventListener('click', () => {
+      this.singleTestState = 'confirming';
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-single-cancel')?.addEventListener('click', () => {
+      this.singleTestState = 'idle';
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-single-execute')?.addEventListener('click', () => {
+      this.executeSingleShortTest();
+    });
+
+    // Bulk execution bindings
+    this.shadowRoot.getElementById('btn-bypass-gate')?.addEventListener('click', () => {
+      this.isGateBypassed = true;
+      this.render();
+    });
+
+    this.shadowRoot.getElementById('btn-start-bulk')?.addEventListener('click', () => {
+      this.executeBulkAssignment();
+    });
+
+    this.shadowRoot.getElementById('btn-cancel-bulk')?.addEventListener('click', () => {
+      this.cancelBulkJob();
+    });
+
+    this.shadowRoot.getElementById('btn-reset-bulk')?.addEventListener('click', () => {
+      this.bulkJobState = 'idle';
+      this.bulkSummary = null;
+      this.bulkItemsProgress.clear();
+      this.render();
+    });
+
+    // Inspector bindings
     this.shadowRoot.getElementById('toggle-capture-btn')?.addEventListener('click', () => {
       this.toggleCapture();
     });
 
-    this.shadowRoot.getElementById('clear-captures-btn')?.addEventListener('click', () => {
-      this.clearCaptures();
-    });
-
-    // Replay controls bindings
-    this.shadowRoot.getElementById('btn-show-confirm')?.addEventListener('click', () => {
-      this.replayState = 'confirming';
-      this.render();
-    });
-
-    this.shadowRoot.getElementById('btn-cancel-confirm')?.addEventListener('click', () => {
-      this.replayState = 'idle';
-      this.render();
-    });
-
-    this.shadowRoot.getElementById('btn-exec-replay')?.addEventListener('click', () => {
-      this.triggerReplay();
-    });
-
-    this.shadowRoot.getElementById('btn-dismiss-replay')?.addEventListener('click', () => {
-      this.replayState = 'idle';
-      this.replayResult = null;
-      this.render();
-    });
-
-    // Copy buttons
     this.shadowRoot.querySelectorAll<HTMLButtonElement>('.copy-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = Number(btn.getAttribute('data-copy-idx'));
         const targetReq = this.capturedRequests[idx];
         if (targetReq) {
-          const exportData = {
-            method: targetReq.method,
-            url: targetReq.url,
-            pathname: targetReq.pathname,
-            contentType: targetReq.contentType,
-            status: targetReq.status,
-            safeHeaders: targetReq.safeHeaders,
-            sanitizedBody: targetReq.sanitizedBody
-          };
-          this.copyToClipboard(JSON.stringify(exportData, null, 2), btn);
+          this.copyToClipboard(JSON.stringify(targetReq, null, 2), btn);
         }
       });
     });

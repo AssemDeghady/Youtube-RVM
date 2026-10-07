@@ -69,10 +69,46 @@ export interface ReplayResult {
   attestationRejected?: boolean;
 }
 
+export type MutationItemStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+
+export interface MutationItemProgress {
+  sourceShortId: string;
+  targetVideoId: string;
+  status: MutationItemStatus;
+  httpStatus?: number;
+  statusText?: string;
+  durationMs?: number;
+  error?: string;
+  attestationRejected?: boolean;
+}
+
+export interface MutationJobSummary {
+  jobId: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  isCancelled: boolean;
+  items: MutationItemProgress[];
+}
+
+export interface MutationExecutePayload {
+  jobId: string;
+  sourceShortIds: string[];
+  targetVideoId: string;
+  delayMs?: number;
+}
+
 export const BRIDGE_EVENTS = {
   CAPTURE: 'shortlinker-network-capture',
   CONTROL: 'shortlinker-control-command',
   MUTATION_DETECTED: 'shortlinker-mutation-detected',
   REPLAY_REQUEST: 'shortlinker-replay-request',
-  REPLAY_RESPONSE: 'shortlinker-replay-response'
+  REPLAY_RESPONSE: 'shortlinker-replay-response',
+  EXECUTE_MUTATION: 'shortlinker-execute-mutation',
+  MUTATION_PROGRESS: 'shortlinker-mutation-progress',
+  MUTATION_COMPLETE: 'shortlinker-mutation-complete',
+  CANCEL_MUTATION: 'shortlinker-cancel-mutation',
+  TEMPLATE_STATUS_REQUEST: 'shortlinker-template-status-request',
+  TEMPLATE_STATUS_RESPONSE: 'shortlinker-template-status-response'
 } as const;
