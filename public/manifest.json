@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "ShortLinker POC - YouTube Studio Related Video",
+  "version": "0.1.0",
+  "description": "Minimal technical proof-of-concept for inspecting the YouTube Shorts Related Video workflow in YouTube Studio.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://studio.youtube.com/*"
+      ],
+      "js": [
+        "interceptor.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://studio.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "interceptor.js"
+      ],
+      "matches": [
+        "https://studio.youtube.com/*"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "youtube-rvm-shortlinker-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal MV3 Chrome Extension POC for YouTube Studio Related Video research",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "watch": "tsc --noEmit && node scripts/build.mjs --watch"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.308",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0"
+  }
+}
