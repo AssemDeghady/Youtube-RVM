@@ -1,3 +1,5 @@
+import type { ClassifiedError } from '../common/error-classifier';
+
 export type StudioPageType =
   | 'dashboard'
   | 'content_shorts'
@@ -30,6 +32,22 @@ export type BodyRepresentationType =
   | 'empty'
   | 'binary/unsupported';
 
+export type AutomationState =
+  | 'idle'
+  | 'navigating_to_editor'
+  | 'waiting_for_editor'
+  | 'opening_related_video'
+  | 'waiting_for_picker'
+  | 'searching_target'
+  | 'selecting_target'
+  | 'saving'
+  | 'waiting_for_save'
+  | 'save_succeeded'
+  | 'save_failed'
+  | 'returning_to_list'
+  | 'cancelled'
+  | 'timeout';
+
 export interface CapturedRequest {
   id: string;
   timestamp: string;
@@ -41,9 +59,9 @@ export interface CapturedRequest {
   safeHeaders: Record<string, string>;
   sanitizedBody: any;
   bodyType: BodyRepresentationType;
-  status: number | null;
-  statusText: string | null;
-  durationMs: number | null;
+  status: number;
+  statusText: string;
+  durationMs: number;
   source: 'fetch' | 'xhr';
 }
 
@@ -51,25 +69,26 @@ export interface RelatedVideoMutationMeta {
   sourceVideoId: string;
   targetVideoId: string;
   timestamp: string;
-  httpStatus: number | null;
-  pathname: string;
+  httpStatus?: number;
+  pathname?: string;
   flowType?: string;
-  hasAttestation: boolean;
+  hasAttestation?: boolean;
 }
 
-export interface ReplayResult {
-  success: boolean;
-  httpStatus: number;
-  statusText: string;
-  durationMs: number;
-  sourceVideoId: string;
+export interface TemplateStatus {
+  hasTemplate: boolean;
+  sourceVideoId?: string;
+  targetVideoId?: string;
+  timestamp?: string;
+}
+
+export interface AutomationJob {
+  jobId: string;
+  sourceShortIds: string[];
   targetVideoId: string;
-  timestamp: string;
-  sanitizedResponseSnippet: string;
-  attestationRejected?: boolean;
+  targetTitle?: string;
+  createdAt: number;
 }
-
-import type { ClassifiedError } from '../common/error-classifier';
 
 export type MutationItemStatus =
   | 'queued'
@@ -83,6 +102,7 @@ export interface MutationItemProgress {
   sourceShortId: string;
   targetVideoId: string;
   status: MutationItemStatus;
+  stepDescription?: string;
   httpStatus?: number;
   statusText?: string;
   durationMs?: number;
@@ -122,6 +142,7 @@ export interface MutationExecutePayload {
   jobId: string;
   sourceShortIds: string[];
   targetVideoId: string;
+  targetTitle?: string;
   delayMs?: number;
 }
 
@@ -131,23 +152,23 @@ export interface TargetVideo {
   thumbnailUrl?: string;
   duration?: string;
   publishedAt?: string;
-  videoType?: string; // 'upload' | 'short' | 'live' | etc.
+  videoType?: string;
 }
 
 export const BRIDGE_EVENTS = {
-  CAPTURE: 'shortlinker-network-capture',
   CONTROL: 'shortlinker-control-command',
+  CAPTURE: 'shortlinker-capture-event',
   MUTATION_DETECTED: 'shortlinker-mutation-detected',
-  REPLAY_REQUEST: 'shortlinker-replay-request',
-  REPLAY_RESPONSE: 'shortlinker-replay-response',
-  EXECUTE_MUTATION: 'shortlinker-execute-mutation',
-  MUTATION_PROGRESS: 'shortlinker-mutation-progress',
-  MUTATION_COMPLETE: 'shortlinker-mutation-complete',
-  CANCEL_MUTATION: 'shortlinker-cancel-mutation',
   TEMPLATE_STATUS_REQUEST: 'shortlinker-template-status-request',
   TEMPLATE_STATUS_RESPONSE: 'shortlinker-template-status-response',
+  CLEAR_TEMPLATE: 'shortlinker-clear-template',
+  EXECUTE_MUTATION: 'shortlinker-execute-mutation',
+  CANCEL_MUTATION: 'shortlinker-cancel-mutation',
+  MUTATION_PROGRESS: 'shortlinker-mutation-progress',
+  MUTATION_COMPLETE: 'shortlinker-mutation-complete',
   CATALOG_REQUEST: 'shortlinker-catalog-request',
   CATALOG_RESPONSE: 'shortlinker-catalog-response',
   REFRESH_CATALOG: 'shortlinker-refresh-catalog',
-  RETRY_FAILED: 'shortlinker-retry-failed'
+  DIAGNOSTIC_NETWORK: 'shortlinker-diagnostic-network',
+  DIAGNOSTIC_CONTROL: 'shortlinker-diagnostic-control'
 } as const;

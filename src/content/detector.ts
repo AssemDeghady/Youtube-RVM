@@ -94,33 +94,4 @@ export function getStudioContext(): StudioPageContext {
   };
 }
 
-/**
- * Nicely formatted console logging for YouTube Studio context.
- */
-export function logStudioDiagnostics(context: StudioPageContext, eventReason = 'Initial Load'): void {
-  const prefix = '%c[ShortLinker POC]';
-  const style = 'background: #0f172a; color: #38bdf8; font-weight: bold; padding: 2px 6px; border-radius: 4px;';
-  
-  console.groupCollapsed(
-    `${prefix} YouTube Studio Event: ${eventReason} (${context.pageType})`,
-    style
-  );
-  console.log('%cPage Context Details:', 'font-weight: bold; color: #64748b;', {
-    PageType: context.pageType,
-    VideoId: context.videoId || '(none)',
-    ChannelId: context.channelId || '(none)',
-    Pathname: context.pathname,
-    URL: context.url,
-    Title: context.title,
-    Timestamp: context.timestamp
-  });
-  console.log(
-    '%cRelated Video Inspection Target:%c ' +
-      (context.pageType === 'video_details' && context.videoId
-        ? `Ready to inspect video editor for video ID: ${context.videoId}`
-        : 'Navigate to Video Details editor (/video/<id>/edit) to inspect Related Video inputs.'),
-    'font-weight: bold; color: #22c55e;',
-    'color: #94a3b8;'
-  );
-  console.groupEnd();
-}
+

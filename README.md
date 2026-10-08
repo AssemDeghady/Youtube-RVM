@@ -1,118 +1,88 @@
-# YouTube Related Video Manager
+# ShortLinker — YouTube Shorts Related Video Manager
 
-A local-first browser extension created to help creators bulk link their YouTube Shorts to long-form videos, directly through their existing YouTube Studio session.
+ShortLinker is an open-source Chrome/Chromium extension (Manifest V3) that bulk-assigns a **Related Video** to multiple YouTube Shorts directly from the YouTube Studio Shorts listing page (`studio.youtube.com/channel/.../videos/short`).
 
-## Why this exists
+By operating entirely within the listing page, ShortLinker updates dozens of Shorts in seconds without navigating through individual video editors.
 
-If you create YouTube Shorts to point viewers toward your deep-dive videos, you probably know the pain: you can attach a Related Video to a Short, but YouTube only lets you do it manually, one single video at a time.
+---
 
-For anyone managing dozens or hundreds of Shorts, that means hours of repetitive clicking. To make matters worse, Google's official YouTube Data API v3 does not expose the Related Video property anywhere in its endpoints.
+## Features
 
-YouTube RVM was born to solve that. The goal is simple: an open-source, community-driven tool that handles bulk linking right inside your browser, without any middleman.
+- **Listing-Page Bulk Operations:** Apply changes to 30+ Shorts at once directly from the Shorts table. No editor page loads, no tab juggling.
+- **Native Selection Integration:** Automatically detects Shorts selected using YouTube Studio's standard checkboxes.
+- **Smart Target Video Picker:** Select from your channel's recent videos or paste any YouTube video link/ID.
+- **Sequential Execution & Safety:** Applies updates sequentially with adjustable delays (800ms default) to respect YouTube Studio rate limits.
+- **Live Progress & Stop Control:** Real-time progress bar with per-item status, instant cancel/stop button, and one-click retry for failed items.
+- **Zero Credential Persistence:** Operates strictly within your authenticated browser session. No passwords, tokens, or cookies are ever stored, exported, or transmitted externally.
 
-## Our design principles
+---
 
-Everything in this project is built around privacy, simplicity, and keeping complete control in your hands.
+## Workflow
 
-• Local first: Everything runs on your machine inside your browser. There is no remote backend, no external database, and no cloud server collecting your data.
+1. **Open YouTube Studio:** Navigate to **Content** &rarr; **Shorts** on [YouTube Studio](https://studio.youtube.com).
+2. **One-Time Calibration:** Open any Short in Studio, set a Related Video, and click **Save**. ShortLinker captures the active session request template in volatile memory.
+3. **Select Shorts:** Return to the Shorts listing page and check the boxes next to the Shorts you want to update.
+4. **Choose Target Video:** In the ShortLinker panel, pick a video from the channel catalog or paste any YouTube video link.
+5. **Apply:** Click **Apply to Selected Shorts**. ShortLinker updates each Short sequentially from the listing page.
+6. **Review Results:** Monitor progress in real time. If needed, click **Retry Failed** to reprocess any items that encountered a temporary error.
 
-• No API keys or Google Cloud setup: You do not need a developer account, API quotas, or complex OAuth verification screens. The extension simply uses your already-signed-in YouTube Studio tab.
+---
 
-• Complete privacy: We never ask for your Google password, we never touch your session cookies, and we never scrape account credentials.
+## Quick Start
 
-• Free and open source forever: No subscriptions, no locked tiers, and no hidden telemetry.
+### Prerequisites
 
-## Current status: Production Grade Shorts Bulk Assigner
+- **Node.js** (v18 or higher)
+- **npm**
+- Google Chrome, Brave, Microsoft Edge, or any Chromium-based browser
 
-The extension operates directly from the YouTube Studio Shorts List View:
-studio.youtube.com/channel/.../videos/short
+### Build
 
-Creators can:
-1. Select one or more Shorts using YouTube Studio's own table checkboxes.
-2. Click Select Related Video to open a searchable picker containing their channel's videos.
-3. Search instantly by title or video ID.
-4. Pick any target video, which displays with its title and thumbnail.
-5. Review the clear confirmation modal before starting any bulk action.
-6. Watch live progress with an animated progress bar and per-video status indicators.
-7. Stop the queue at any moment with clean accounting that never marks unreached items as failed.
-8. If any updates fail, view creator-friendly error reasons and retry only the failed items with one click.
-9. Copy failed video IDs to clipboard for easy tracking.
-10. Access advanced diagnostics and network inspection tucked neatly behind a collapsible toggle.
+```bash
+# Clone the repository
+git clone https://github.com/AssemDeghady/Youtube-RVM.git
+cd Youtube-RVM
 
-## Project overview
+# Install dependencies
+npm install
 
-```
-youtube_rvm/
-  dist/                  Compiled extension ready to load into Chrome
-  public/                Manifest and icon assets
-  scripts/build.mjs      Vite build script producing self-contained bundles
-  scripts/test.mjs       Automated unit test suite covering picker & mutation flows
-  src/
-    common/              Filters, catalog parser, in-memory store, URL normalizer
-    content/             Studio detector, selection tracker, and picker panel UI
-    interceptor/         MAIN-world fetch observer, catalog loader, and executor
-    types/               Shared TypeScript interfaces
-  package.json           Dependencies and build scripts
-  tsconfig.json          Strict TypeScript configuration
+# Compile production build (outputs to dist/)
+npm run build
 ```
 
-## Getting started
+To create a production distribution ZIP for the Chrome Web Store:
+```bash
+npm run package
+```
+This produces `release/ShortLinker-v1.0.0.zip`.
 
-You will need Node.js (version 18 or newer) and npm installed on your computer.
+### Run Automated Tests
 
-1. Clone this repository to your machine.
+```bash
+npm test
+```
+Runs the automated test suite verifying video ID validation, header filtering, catalog search ranking, queue state machines, cancellation semantics, and payload sanitization.
 
-2. Install dependencies:
-   npm install
+### Install / Deploy
 
-3. Run automated tests:
-   npm test
+1. Open your Chromium browser and go to `chrome://extensions/`.
+2. Toggle **Developer mode** on (top-right corner).
+3. Click **Load unpacked** (top-left corner).
+4. Select the `dist/` directory inside this repository.
+5. Navigate to [YouTube Studio](https://studio.youtube.com) &rarr; **Content** &rarr; **Shorts**.
+6. The ShortLinker panel will appear in the bottom-right corner of the page.
 
-4. Build the extension:
-   npm run build
+---
 
-If you want the bundler to automatically rebuild whenever you make changes to the source files, run:
-   npm run watch
+## Security & Privacy Guarantees
 
-## Loading the extension into your browser
+- **No Credential Storage:** The extension never writes tokens, session keys, or credentials to `chrome.storage`, `localStorage`, or disk.
+- **No `cookies` Permission:** The extension does not request the `cookies` permission in `manifest.json`.
+- **Zero External Connections:** No analytics, no tracking, and no external backends. 100% of network traffic occurs exclusively between your browser and `studio.youtube.com`.
+- **Volatile In-Memory Lifecycle:** The mutation template exists only in temporary JavaScript memory during the active tab session and is purged upon tab close or manual clear.
 
-1. Open Google Chrome, Brave, Edge, or any Chromium-based browser.
-2. Type chrome://extensions in your address bar and press Enter.
-3. Turn on Developer mode using the toggle switch in the top right corner.
-4. Click the Load unpacked button in the top left corner.
-5. Choose the dist directory inside this project folder.
-6. The extension is now active and ready.
+---
 
-## How to use the Bulk Video Assigner
+## License
 
-1. Open studio.youtube.com in your browser while signed in.
-2. Navigate to Content in the left menu, then switch to the Shorts tab.
-3. In the bottom right corner, open the ShortLinker card.
-4. Select one or more Shorts using YouTube Studio's table checkboxes.
-5. Under Related Video, click Select Related Video.
-6. A searchable picker opens showing your channel's videos:
-   • Type in the search box to filter instantly by title or video ID
-   • Click any video to select it as the target Related Video
-   • The picker closes, and your selected video's title and thumbnail are shown
-7. Optional Fallback: If you ever need to link a video not listed, click "Or enter YouTube URL / ID manually" to paste a link directly.
-8. Click Assign to Selected Shorts to open the Confirmation dialog.
-9. Review the confirmation details and click Start Assignment.
-10. The extension executes each update sequentially with a gentle delay, displaying a live progress bar and per-video status.
-11. You can click Stop at any time to pause the queue.
-12. When finished, if any Shorts encountered issues, click Retry Failed to run only the failed items, or click Copy Failed IDs to copy them.
-
-## Built-in safety precautions
-
-The extension was engineered with strict guardrails:
-
-• In-memory session execution: All updates are made through your browser session in the main page world. No credentials, cookies, or auth tokens are ever logged, stored, or sent across the bridge.
-
-• Safe sequential processing: Mutations run one by one with a configurable pause between requests. We never fire simultaneous bulk requests that could overload your session.
-
-• Deep automatic redaction: All sensitive keys such as tokens, auth hashes, cookies, and session strings are recursively replaced with redacted placeholders in all diagnostic views.
-
-• In-memory only: Captured requests and video catalogs live in browser memory during your session. Nothing is ever written to disk, local storage, or external logs.
-
-## Contributing
-
-Whether you are a creator testing this on your channel or an engineer looking to help with bulk queuing and UI design, your feedback is warmly welcomed. Feel free to open an issue or start a discussion.
+MIT License. See [LICENSE](LICENSE) for details.

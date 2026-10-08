@@ -2,9 +2,10 @@ import { build } from 'vite';
 import { resolve } from 'path';
 
 const isWatch = process.argv.includes('--watch');
+const enableSourcemap = process.argv.includes('--sourcemap');
 
 async function runBuild() {
-  console.log('[Build] Building ShortLinker POC Chrome Extension...');
+  console.log('[Build] Building ShortLinker Chrome Extension (Production)...');
 
   // 1. Build Isolated-World Content Script
   await build({
@@ -13,7 +14,7 @@ async function runBuild() {
     build: {
       outDir: 'dist',
       emptyOutDir: true,
-      sourcemap: true,
+      sourcemap: enableSourcemap,
       watch: isWatch ? {} : null,
       rollupOptions: {
         input: resolve(process.cwd(), 'src/content/index.ts'),
@@ -33,7 +34,7 @@ async function runBuild() {
     build: {
       outDir: 'dist',
       emptyOutDir: false,
-      sourcemap: true,
+      sourcemap: enableSourcemap,
       watch: isWatch ? {} : null,
       rollupOptions: {
         input: resolve(process.cwd(), 'src/interceptor/index.ts'),

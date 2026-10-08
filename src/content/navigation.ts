@@ -1,5 +1,5 @@
 import { NavigationChangeCallback } from '../types';
-import { getStudioContext, logStudioDiagnostics } from './detector';
+import { getStudioContext } from './detector';
 
 export class StudioNavigationObserver {
   private currentUrl: string;
@@ -26,7 +26,6 @@ export class StudioNavigationObserver {
       if (window.location.href !== this.currentUrl) {
         this.currentUrl = window.location.href;
         const context = getStudioContext();
-        logStudioDiagnostics(context, `SPA Navigation (${reason})`);
         for (const cb of this.callbacks) {
           try {
             cb(context);

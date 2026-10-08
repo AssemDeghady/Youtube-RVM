@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "ShortLinker POC - YouTube Studio Related Video",
-  "version": "0.1.0",
-  "description": "Minimal technical proof-of-concept for inspecting the YouTube Shorts Related Video workflow in YouTube Studio.",
+  "name": "ShortLinker — YouTube Shorts Related Video Manager",
+  "version": "1.0.0",
+  "description": "Bulk assign one Related Video to multiple YouTube Shorts directly from YouTube Studio.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

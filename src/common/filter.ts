@@ -125,7 +125,7 @@ export function isRelatedVideoMutation(
     return { isRelatedVideoMutation: false };
   }
 
-  const sourceVideoId = parsedBody.encryptedVideoId || '';
+  const sourceVideoId = parsedBody.encryptedVideoId || parsedBody.videoId || '';
   const flowType = parsedBody.flowType || '';
   const hasAttestation = Boolean(parsedBody.attestationResponseData);
 
