@@ -1,8 +1,12 @@
 # ShortLinker — YouTube Shorts Related Video Manager
 
+[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Install%20Extension-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/shortlinker-%E2%80%94-youtube-sho/pnjcmlogjjkpkbiohkpjipfibiobmoie?authuser=0&hl=en)
+
 ShortLinker is an open-source Chrome/Chromium extension (Manifest V3) that bulk-assigns a **Related Video** to multiple YouTube Shorts directly from the YouTube Studio Shorts listing page (`studio.youtube.com/channel/.../videos/short`).
 
 By operating entirely within the listing page, ShortLinker updates dozens of Shorts in seconds without navigating through individual video editors.
+
+👉 **[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/shortlinker-%E2%80%94-youtube-sho/pnjcmlogjjkpkbiohkpjipfibiobmoie?authuser=0&hl=en)**
 
 ---
 
@@ -65,6 +69,10 @@ Runs the automated test suite verifying video ID validation, header filtering, c
 
 ### Install / Deploy
 
+#### Option A: Install from Chrome Web Store (Recommended)
+Install directly from the official [Chrome Web Store page](https://chromewebstore.google.com/detail/shortlinker-%E2%80%94-youtube-sho/pnjcmlogjjkpkbiohkpjipfibiobmoie?authuser=0&hl=en).
+
+#### Option B: Load Unpacked (Developer Mode)
 1. Open your Chromium browser and go to `chrome://extensions/`.
 2. Toggle **Developer mode** on (top-right corner).
 3. Click **Load unpacked** (top-left corner).
